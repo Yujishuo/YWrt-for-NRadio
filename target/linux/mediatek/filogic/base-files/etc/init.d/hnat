@@ -1,0 +1,93 @@
+#!/bin/sh /etc/rc.common
+# MTK 硬件 NAT（mtk_hnat / HNAT）启停
+#
+# v24 默认 **不启用**（/etc/config/hnat 里 option enabled '0'），
+# 只在驱动层面把它编进来、装好、随系统可加载。
+#
+# ⚠️ 2026-11-10 已结案：**必须保持不启用**。不是"待验证"，是"已验证不可用"。
+#   开 hook 后下行 TCP/UDP 全断（ICMP 正常），根因在 nf_hook 逻辑：
+#     · hnat_nf_hook.c:1243 只要入接口是 ext(eth2) 就无条件 do_hnat_ext_to_ge()
+#       + NF_STOLEN，不看表项有没有 BIND；
+#     · hnat_nf_hook.c:3014 唯一绑定入口 `if (!IS_WHNAT(out) && IS_EXT(out))
+#       return 0;`，上行 out=eth2 → 恒真 → 表项永远 UNBIND；
+#     · 软件写 PPE1、PPD 注入却查 PPE0（GDM3_IG_CTRL=c0713333）→ 必然丢包。
+#   详见 docs/HNAT问题记录-交接.md §15（含已排除项与修复清单）。
+#
+# 时序说明（若将来修好需要重开，这条仍然成立）：
+#   START=19 必须排在 network(START=20) 之前 ——
+#   外置网卡是靠 NETDEV_UP 事件按 ext-devices-prefix 纳管的
+#   （nf_hnat_netdevice_event → extif_set_dev(dev, 1)），没有开机扫描。
+#   USB 5G 模组（eth2）是拨号之后才 up，肯定晚于 S19，所以只要模块在
+#   network 起来之前加载，eth2 一定能被纳管。反过来如果排在 network 之后
+#   （比如 S39），只要 eth2 已经 up 过就再也注册不进来，当次开机下行
+#   就没有 ext→GE 卸载。
+
+START=19
+STOP=10
+
+HNAT_PATH=/sys/kernel/debug/hnat
+
+start() {
+	. /lib/functions.sh
+
+	local enabled ipv6 bind_rate
+	config_load hnat
+	config_get_bool enabled  config enabled   0
+	config_get_bool ipv6     config ipv6      1
+	config_get      bind_rate config bind_rate 30
+
+	[ "$enabled" = "1" ] || {
+		logger -t hnat "disabled in /etc/config/hnat，不加载驱动"
+		return 0
+	}
+
+	# ppd = gmac2 那个虚拟网卡（DTS 里 label = "hnat"）。
+	# do_hnat_ext_to_ge() 最后是 dev_queue_xmit(g_ppdev)，网卡 DOWN 时
+	# qdisc 是 noop，包会被直接丢掉，所以必须先拉起来。
+	ip link set hnat up 2>/dev/null
+
+	modprobe mtkhnat || {
+		logger -t hnat "modprobe mtkhnat 失败"
+		return 1
+	}
+
+	# 等 debugfs 出来（probe 里有 DMA 分配，不是瞬时的）
+	local i=0
+	while [ ! -d "$HNAT_PATH" ] && [ "$i" -lt 40 ]; do
+		sleep 0.05 2>/dev/null || sleep 1
+		i=$((i + 1))
+	done
+	[ -d "$HNAT_PATH" ] || {
+		logger -t hnat "mtkhnat 已加载但 $HNAT_PATH 不存在"
+		return 1
+	}
+
+	# cr_set_func 索引（hnat_debugfs.c:953）：
+	#   7  = set_nf_update_toggle   （把计数回写给 nf_conntrack）
+	#   8  = set_ipv6_toggle
+	#   11 = bind_rate_setting      （1~30，超过按 30）
+	# 注意 TurboACC 里写的是 "7 <bind_rate>"，那其实是 nf_update，
+	# 不是 bind rate —— 这里按驱动真实语义写。
+	echo "8 $ipv6"       > "$HNAT_PATH/hnat_setting" 2>/dev/null
+	echo "11 $bind_rate" > "$HNAT_PATH/hnat_setting" 2>/dev/null
+
+	# probe 里 hnat_enable_hook() 已经置 1，这里只是保证「配置写了 1 就一定是 1」
+	echo 1 > "$HNAT_PATH/hook_toggle" 2>/dev/null
+
+	logger -t hnat "enabled (ipv6=$ipv6 bind_rate=$bind_rate)"
+	return 0
+}
+
+stop() {
+	# 只关 hook，不 rmmod：hnat_remove 会 unregister 一堆 notifier 并清 FOE 表，
+	# 网络还在跑的时候卸载没必要，也更容易出状况。
+	[ -d "$HNAT_PATH" ] || return 0
+	echo 0 > "$HNAT_PATH/hook_toggle" 2>/dev/null
+	logger -t hnat "hook disabled"
+	return 0
+}
+
+restart() {
+	stop
+	start
+}

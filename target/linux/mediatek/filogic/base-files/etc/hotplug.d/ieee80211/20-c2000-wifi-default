@@ -1,0 +1,38 @@
+#!/bin/sh
+# 【C2000】首次开机把 wifi-device 的国家码补成 CN（只跑一次）。
+#
+# 为什么要设：国家码为空时 cfg80211 用 world 域（country 00），其中
+#   (5250 - 5330 @ 80), DFS, PASSIVE-SCAN   →  等价 NO-IR
+# 而 ch36 的 160MHz 信道定义是 5170-5330，必然含这段 NO-IR 子信道，
+# hostapd 直接判 "could not get valid channel"，5GHz 接口根本起不来。
+# 设成 CN 后 (5250-5350 @ 80) 只有 DFS、没有 NO-IR，才能以 160MHz 启用
+# （代价是 60 秒 CAC，见 LuCI 无线页的二次确认弹窗）。
+#
+# 为什么放 hotplug 而不是 uci-defaults：
+#   /etc/config/wireless 是网卡热插拔时由 /etc/hotplug.d/ieee80211/10-wifi-detect
+#   调 `wifi config` 生成的，uci-defaults（boot S10）执行时这个文件往往还不存在，
+#   放那儿会空跑一次然后被自动删除，等于没设。这里用 20- 前缀紧跟 10-wifi-detect，
+#   时序确定。
+#
+# 只跑一次：用 /etc/c2000-wifi-default.done 标记（在 overlay 里，重刷才消失），
+# 之后用户自己改的国家码不会被覆盖。
+
+[ -f /etc/c2000-wifi-default.done ] && exit 0
+[ "${ACTION}" = "add" ] || exit 0
+[ -f /etc/config/wireless ] || exit 0
+
+changed=0
+
+for r in $(uci -q show wireless | grep -E '=wifi-device$' | cut -d. -f2 | cut -d= -f1); do
+	[ -z "$(uci -q get wireless.$r.country)" ] || continue
+	uci set "wireless.$r.country=CN" && changed=1
+done
+
+: > /etc/c2000-wifi-default.done
+
+[ "$changed" = 1 ] || exit 0
+
+uci commit wireless
+ubus call network.wireless reconf >/dev/null 2>&1
+
+exit 0

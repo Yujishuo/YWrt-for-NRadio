@@ -1,0 +1,106 @@
+#!/bin/sh
+# rpcd 后端：给 LuCI（luci-app-c2000-modem）用的 ubus 对象 "c2000-modem"
+. /usr/share/libubox/jshn.sh
+
+S=/usr/sbin/c2000-modem
+
+case "$1" in
+list)
+	json_init
+	json_add_object "status"
+	json_close_object
+	json_add_object "at"
+	json_add_string "cmd" "str"
+	json_close_object
+	json_add_object "reconnect"
+	json_close_object
+	json_add_object "switch"
+	json_add_string "target" "str"
+	json_close_object
+	json_add_object "siminfo"
+	json_close_object
+	json_add_object "simswitch"
+	json_add_string "slot" "str"
+	json_add_string "mode" "str"
+	json_close_object
+	json_add_object "simauto"
+	json_add_string "action" "str"
+	json_close_object
+	json_add_object "simsetmode"
+	json_add_string "mode" "str"
+	json_close_object
+	json_dump
+	;;
+call)
+	case "$2" in
+	status)
+		out=$($S status 2>/dev/null)
+		[ -n "$out" ] || out='{"present":false}'
+		printf '%s\n' "$out"
+		;;
+	at)
+		json_load "$(cat)"
+		json_get_var cmd cmd
+		resp=$($S at "$cmd" 2>&1)
+		json_init
+		json_add_string "output" "$resp"
+		json_dump
+		;;
+	reconnect)
+		out=$($S reconnect 2>/dev/null)
+		[ -n "$out" ] || out='{"ok":false}'
+		printf '%s\n' "$out"
+		;;
+	switch)
+		json_load "$(cat)"
+		json_get_var target target
+		out=$($S switch "$target" 2>/dev/null)
+		[ -n "$out" ] || out='{"ok":false}'
+		printf '%s\n' "$out"
+		;;
+	siminfo)
+		out=$($S siminfo 2>/dev/null)
+		[ -n "$out" ] || out='{"cfg":0,"slot":0,"result":null}'
+		printf '%s\n' "$out"
+		;;
+	simswitch)
+		json_load "$(cat)"
+		json_get_var slot slot
+		json_get_var mode mode
+		out=$($S simswitch "$slot" "$mode" 2>/dev/null)
+		[ -n "$out" ] || out='{"ok":false,"msg":"no response"}'
+		printf '%s\n' "$out"
+		;;
+	simauto)
+		json_load "$(cat)"
+		json_get_var action action
+		case "$action" in
+		start)
+			# 立刻返回，轮询在后台跑；前端靠 siminfo 的 result/autorun 看进度
+			$S simauto >/dev/null 2>&1 &
+			printf '{"ok":true,"started":true}\n'
+			;;
+		stop)
+			$S simstop >/dev/null 2>&1
+			printf '{"ok":true,"stopped":true}\n'
+			;;
+		*)
+			printf '{"ok":false,"msg":"action 只能是 start 或 stop"}\n'
+			;;
+		esac
+		;;
+	simsetmode)
+		json_load "$(cat)"
+		json_get_var mode mode
+		out=$($S simsetmode "$mode" 2>/dev/null)
+		[ -n "$out" ] || out='{"ok":false,"msg":"no response"}'
+		printf '%s\n' "$out"
+		;;
+	*)
+		json_init
+		json_add_string "error" "unknown method"
+		json_dump
+		;;
+	esac
+	;;
+esac

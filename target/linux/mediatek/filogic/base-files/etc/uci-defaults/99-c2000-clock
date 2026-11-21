@@ -1,0 +1,12 @@
+#!/bin/sh
+# 让关机侧的时间戳钩子生效。
+#
+# /etc/init.d/c2000-clock 是由 device/files-bsp/overlay 直接铺进 rootfs 的，
+# 没有包 postinst 帮它跑 `enable`，所以 /etc/rc.d 下不会有 K01 链接，
+# 关机时 stop() 就不会被调用。这里补上。
+#
+# 首次开机有效；之后状态在 overlay 里，重刷/复位会再跑一次。
+
+[ -x /etc/init.d/c2000-clock ] && /etc/init.d/c2000-clock enable
+
+exit 0

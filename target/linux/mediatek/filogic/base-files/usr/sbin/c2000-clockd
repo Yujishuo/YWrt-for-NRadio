@@ -1,0 +1,51 @@
+#!/bin/sh
+# 方案 E 掉电兜底：无电池 RTC 设备的时间持久化守护
+#
+# ── 为什么需要它 ──────────────────────────────────────
+# 本机没有 RTC（/dev/rtc0 不存在，DTS 里也没有 rtc 节点），唯一的跨重启时钟
+# 载体是 overlay 上的文件 mtime：
+#   /etc/init.d/sysfixtime（START=00）扫 /etc 下最新 mtime 当开机时钟
+#   → 我们把「上次已知正确的时间」记在 /etc/c2000-clock 的 mtime 上
+#
+# 原来只有两条写入路径：
+#   1. /etc/init.d/c2000-clock 的 stop()  —— 正常关机/重启时
+#   2. /etc/hotplug.d/ntp/90-c2000-clock  —— NTP 同步到 stratum 时
+# 两条在「直接拔电源」时都不会执行 → 开机时钟退回镜像构建时间（实测差 2.5 天）。
+#
+# 解决办法：周期记录。只要还活着就每 INTERVAL 秒推进一次 mtime，
+# 拔电后最坏情况只落后 INTERVAL 秒。
+#
+# ── 为什么是 300 秒 ──────────────────────────────────
+# 写入量 ≈ 8 KB/次 × 288 次/天 ≈ 2.3 MB/天 ≈ 0.85 GB/年，对 128 GB 卡可忽略；
+# 且 f2fs 的周期 checkpoint 本来就 60 秒一次，把间隔压到 60 秒会让 checkpoint
+# 从「无脏数据就跳过」变成「天天 1440 次」，得不偿失。
+# 想要更准可以改 /etc/config/c2000clock 的 interval 或环境变量
+# C2000_CLOCK_INTERVAL。
+
+CLOCK_FILE=${C2000_CLOCK_FILE:-/etc/c2000-clock}
+INTERVAL=${C2000_CLOCK_INTERVAL:-300}
+MIN_EPOCH=1577836800	# 2020-01-01：早于它的时间不可信，绝不写进去
+
+record() {
+	local now prev
+
+	now=$(date +%s)
+	[ "$now" -gt "$MIN_EPOCH" ] || return 0
+
+	# 只允许往前走。时钟被回拨时如果把 mtime 改早，
+	# 下次开机会被固化成"更早"的错误时间。
+	prev=$(date -r "$CLOCK_FILE" +%s 2>/dev/null) || prev=0
+	[ "$now" -gt "$prev" ] || return 0
+
+	[ -f "$CLOCK_FILE" ] || : > "$CLOCK_FILE" 2>/dev/null
+	touch "$CLOCK_FILE" 2>/dev/null
+}
+
+# 启动即记一次：把 sysfixtime 刚恢复出来的时间固化下来，
+# 这样「刚开机就拔电」也不会丢。
+record
+
+while :; do
+	sleep "$INTERVAL"
+	record
+done

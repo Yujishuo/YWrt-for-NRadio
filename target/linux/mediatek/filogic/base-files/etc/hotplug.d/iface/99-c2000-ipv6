@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# 让 5G 模组接口（wwan / eth2）接收上游路由通告，从而拿到公网 IPv6
+#
+# 背景
+# ----
+# 路由器模式下 net.ipv6.conf.<dev>.forwarding = 1，内核据此把 accept_ra 的默认值
+# 定为 0 —— 意思是「我在转发，就不该按 RA 自己配地址」。结果是 eth2 只有
+# link-local，移动 5G 下发的 2409:... 公网前缀全被丢掉。
+#
+# 把 accept_ra 显式设为 2（「即使转发也接收 RA」）之后，内核会重新发 RS，
+# 实测 8 秒内就拿到 2409:8d44:.../64 的公网地址 + RA 默认路由（proto ra）。
+#
+# 为什么不用改 uci
+# ----------------
+# 把 network.wwan.proto 改成 '1'（dhcp + dhcpv6 双栈）会走 odhcp6c，
+# 实测 ifup 之后 IPv4 地址不再回来 → 5G 直接断网（2026-11-14 已踩，害用户重置路由器）。
+# 所以这里只动 accept_ra 这一个 sysctl，IPv4 配置一个字不碰。
+#
+# 时机
+# ----
+# 必须在接口 up 之后设才有效，netifd 每次 ifup 都会把它重置回 0，
+# 所以放在 hotplug.d/iface 里，跟着 ifup 事件走。
+#
+# 已知限制
+# --------
+# 运营商只做 SLAAC、RA 里没有可委派前缀（无 PD），所以 LAN 侧拿不到公网 /64。
+# 要让内网设备也用 IPv6，得另配 odhcpd relay 或 NPTv6，不在这里处理。
+#
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "wwan" ] || exit 0
+
+DEV="${DEVICE:-eth2}"
+
+# DEVICE 可能为空或不是我们预期的名字，回退到模组的 NCM 口
+[ -d "/proc/sys/net/ipv6/conf/$DEV" ] || DEV=eth2
+[ -d "/proc/sys/net/ipv6/conf/$DEV" ] || exit 0
+
+echo 2 > "/proc/sys/net/ipv6/conf/$DEV/accept_ra" 2>/dev/null || exit 0

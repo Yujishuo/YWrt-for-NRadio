@@ -1,0 +1,15 @@
+{
+	"luci-app-c2000-modem": {
+		"description": "Grant access to the C2000 Ultra 5G modem helpers",
+		"read": {
+			"ubus": {
+				"c2000-modem": [ "status", "siminfo" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"c2000-modem": [ "at", "reconnect", "switch", "simswitch", "simauto", "simsetmode" ]
+			}
+		}
+	}
+}

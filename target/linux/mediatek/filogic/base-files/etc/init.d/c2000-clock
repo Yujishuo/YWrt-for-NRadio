@@ -1,0 +1,46 @@
+#!/bin/sh /etc/rc.common
+# 方案 E：无 RTC 设备的时间持久化
+#
+# 机制：把「当前已知正确的时间」记在 /etc/c2000-clock 的 mtime 上。
+# 下次开机 /etc/init.d/sysfixtime（START=00）扫 /etc 下最新 mtime 当开机时钟，
+# 正好命中它 → 开机时钟 ≈ 上次存活时刻，不再退回镜像里的旧构建时间。
+#
+# 三条写入路径（互为兜底）：
+#   1. c2000-clockd（本脚本托管的守护进程）—— 每 5 分钟一次，**唯一能兜住拔电的**
+#   2. 本脚本 stop()                      —— 正常关机/重启，精确到秒
+#   3. /etc/hotplug.d/ntp/90-c2000-clock  —— NTP 刚同步成功时立刻记一次
+#
+# 【2026-11-09 修改】原来只有 2/3 两条。实测用户拔电源后开机时钟落后 2.5 天，
+# 因为 stop() 和 hotplug 在掉电时都不执行。现在补上路径 1。
+
+START=99
+STOP=01
+USE_PROCD=1
+
+CLOCK_FILE=/etc/c2000-clock
+MIN_EPOCH=1577836800
+
+record_now() {
+	local now
+	now=$(date +%s)
+	[ "$now" -gt "$MIN_EPOCH" ] || return 0
+	[ -f "$CLOCK_FILE" ] || : > "$CLOCK_FILE" 2>/dev/null
+	touch "$CLOCK_FILE" 2>/dev/null
+}
+
+start_service() {
+	[ -f "$CLOCK_FILE" ] || : > "$CLOCK_FILE" 2>/dev/null
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/c2000-clockd
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_close_instance
+}
+
+stop_service() {
+	record_now
+	# f2fs 是延迟分配，关机路径上显式 sync 一次，确保 mtime 真落盘
+	sync
+}

@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# 固件名自 2026-11-17 起定为 YWrt（用户指定，以后都叫这个），hostname 跟着改。
+#
+# hostname 这里单独写一次，不依赖 VERSION_DIST：VERSION_DIST 只影响
+# /etc/openwrt_release 与 LuCI 页脚，hostname 是 board.json 里独立一项。
+#
+# /etc/config/system 由 /bin/config_generate 在首启时生成，时序上通常已经存在；
+# 这里仍做兜底，免得在精简 rootfs 或异常首启时整个脚本静默失败。
+#
+
+[ -f /etc/config/system ] || touch /etc/config/system
+uci -q get system.@system[0] >/dev/null 2>&1 || uci -q add system system
+
+uci -q set system.@system[0].hostname='YWrt'
+uci -q commit system
+
+exit 0

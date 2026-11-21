@@ -1,0 +1,652 @@
+'use strict';
+'require view';
+'require poll';
+'require request';
+'require network';
+'require ui';
+'require rpc';
+'require tools.prng as random';
+
+return view.extend({
+	callFrequencyList: rpc.declare({
+		object: 'iwinfo',
+		method: 'freqlist',
+		params: [ 'device' ],
+		expect: { results: [] }
+	}),
+
+	callInfo: rpc.declare({
+		object: 'iwinfo',
+		method: 'info',
+		params: [ 'device' ],
+		expect: { }
+	}),
+
+	/* 【C2000 新增】必须能指定用哪个 vif 触发扫描。
+	 * 本机 mt76 的扫描只覆盖「发起扫描那个 vif 所在的频段」：
+	 *   从 phy0.0-ap0（2.4G）发起 → 1.1 s，结果里一条 5G 都没有
+	 *   从 phy0.1-ap0（5G）发起  → 2.9 s，能扫到 5G AP
+	 * 而 iwinfo 把 radio0/radio1 都解析成 2.4G 的 phy0.0-ap0，
+	 * 所以上游的 dev.getScanList()（内部就是 iwinfo scan radioN）永远扫不到 5G。 */
+	callScanList: rpc.declare({
+		object: 'iwinfo',
+		method: 'scan',
+		params: [ 'device' ],
+		nobatch: true,
+		expect: { results: [] }
+	}),
+
+	render_signal_badge(signalPercent, signalValue) {
+		let icon, title, value;
+
+		if (signalPercent < 0)
+			icon = L.resource('icons/signal-none.svg');
+		else if (signalPercent == 0)
+			icon = L.resource('icons/signal-000-000.svg');
+		else if (signalPercent < 25)
+			icon = L.resource('icons/signal-000-025.svg');
+		else if (signalPercent < 50)
+			icon = L.resource('icons/signal-025-050.svg');
+		else if (signalPercent < 75)
+			icon = L.resource('icons/signal-050-075.svg');
+		else
+			icon = L.resource('icons/signal-075-100.svg');
+
+		value = '%d\xa0%s'.format(signalValue, _('dBm'));
+		title = '%s: %d %s'.format(_('Signal'), signalValue, _('dBm'));
+
+		return E('div', {
+			'class': 'ifacebadge',
+			'title': title,
+			'data-signal': signalValue
+		}, [
+			E('img', { 'src': icon }),
+			value
+		]);
+	},
+
+	add_wifi_to_graph(chan_analysis, res, scanCache, channels, channel_width) {
+		const offset_tbl = chan_analysis.offset_tbl;
+		const height = chan_analysis.graph.offsetHeight - 2;
+		const step = chan_analysis.col_width;
+		const height_diff = (height-(height-(res.signal*-4)));
+
+		if (scanCache[res.bssid].color == null)
+			scanCache[res.bssid].color = random.derive_color(res.bssid);
+
+		if (scanCache[res.bssid].graph == null || scanCache[res.bssid].graph === undefined) {
+			const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+			const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+			const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			const color = scanCache[res.bssid].color;
+
+			line.setAttribute('style', 'fill:'+color+'4f'+';stroke:'+color+';stroke-width:0.5');
+			text.setAttribute('style', 'fill:'+color+';font-size:9pt; font-family:sans-serif; text-shadow:1px 1px 1px #000');
+			text.appendChild(document.createTextNode(res.ssid || res.bssid));
+
+			group.appendChild(line);
+			group.appendChild(text);
+
+			chan_analysis.graph.firstElementChild.appendChild(group);
+			scanCache[res.bssid].graph = { group : group, line : line, text : text };
+		}
+
+		channels.forEach(function(channel) {
+			if (channel_width > 2) {
+				if (!("main" in scanCache[res.bssid].graph)) {
+					const main = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+					main.setAttribute('style', 'fill:url(#GradientVerticalCenteredBlack)');
+					scanCache[res.bssid].graph.group.appendChild(main);
+					chan_analysis.graph.firstElementChild.lastElementChild.appendChild(main);
+					scanCache[res.bssid].graph["main"] = main;
+				}
+				const main_offset = offset_tbl[res.channel];
+				const points = [
+					(main_offset-(step*(2  )))+','+height,
+					(main_offset-(step*(2-1)))+','+height_diff,
+					(main_offset+(step*(2-1)))+','+height_diff,
+					(main_offset+(step*(2  )))+','+height
+				];
+				scanCache[res.bssid].graph.main.setAttribute('points', points);
+			}
+
+			const chan_offset = offset_tbl[channel];
+			const points = [
+				(chan_offset-(step*(channel_width  )))+','+height,
+				(chan_offset-(step*(channel_width-1)))+','+height_diff,
+				(chan_offset+(step*(channel_width-1)))+','+height_diff,
+				(chan_offset+(step*(channel_width  )))+','+height
+			];
+
+			scanCache[res.bssid].graph.text.setAttribute('x', offset_tbl[res.channel]-step);
+			scanCache[res.bssid].graph.text.setAttribute('y', height_diff - 2);
+			scanCache[res.bssid].graph.line.setAttribute('points', points);
+			scanCache[res.bssid].graph.group.style.zIndex = res.signal*-1;
+			scanCache[res.bssid].graph.group.style.opacity = res.stale ? '0.5' : null;
+		})
+	},
+
+	create_channel_graph(chan_analysis, freq_tbl, band) {
+		const columns = (band != 2) ? freq_tbl.length * 4 : freq_tbl.length + 3;
+		const chan_graph = chan_analysis.graph;
+		const G = chan_graph.firstElementChild;
+		const step = (chan_graph.offsetWidth - 2) / columns;
+		let curr_offset = step;
+
+		function createGraphHLine(graph, pos, width, dash) {
+			const elem = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+			elem.setAttribute('x1', pos);
+			elem.setAttribute('y1', 0);
+			elem.setAttribute('x2', pos);
+			elem.setAttribute('y2', '100%');
+			elem.setAttribute('style', 'stroke:black;stroke-width:'+width+';stroke-dasharray:'+dash);
+			graph.appendChild(elem);
+		}
+
+		function createGraphText(graph, pos, text) {
+			const elem = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			elem.setAttribute('y', 15);
+			elem.setAttribute('style', 'fill:#eee; font-size:9pt; font-family:sans-serif; text-shadow:1px 1px 1px #000');
+			elem.setAttribute('x', pos + 5);
+			elem.appendChild(document.createTextNode(text));
+			graph.appendChild(elem);
+		}
+
+		chan_analysis.col_width = step;
+
+		createGraphHLine(G,curr_offset, 0.1, 1);
+		for (let i=0; i< freq_tbl.length;i++) {
+			const channel = freq_tbl[i]
+			chan_analysis.offset_tbl[channel] = curr_offset+step;
+
+			if (band != 2) {
+				createGraphHLine(G,curr_offset+step, 0.1, 3);
+				if (channel < 100)
+					createGraphText(G,curr_offset-(step/2), channel);
+				else
+					createGraphText(G,curr_offset-step, channel);
+			} else {
+				createGraphHLine(G,curr_offset+step, 0.1, 0);
+				createGraphText(G,curr_offset+step, channel);
+			}
+			curr_offset += step;
+
+			if ((band != 2) && freq_tbl[i+1]) {
+				const next_channel = freq_tbl[i+1];
+				/* Check if we are transitioning to another 5/6Ghz band range */
+				if ((next_channel - channel) == 4) {
+					for (let j=1; j < 4; j++) {
+						chan_analysis.offset_tbl[channel+j] = curr_offset+step;
+						if (j == 2)
+							createGraphHLine(G,curr_offset+step, 0.1, 0);
+						else
+							createGraphHLine(G,curr_offset+step, 0.1, 1);
+						curr_offset += step;
+					}
+				} else {
+					chan_analysis.offset_tbl[channel+1] = curr_offset+step;
+					createGraphHLine(G,curr_offset+step, 0.1, 1);
+					curr_offset += step;
+
+					chan_analysis.offset_tbl[next_channel-2] = curr_offset+step;
+					createGraphHLine(G,curr_offset+step, 0.5, 0);
+					curr_offset += step;
+
+					chan_analysis.offset_tbl[next_channel-1] = curr_offset+step;
+					createGraphHLine(G,curr_offset+step, 0.1, 1);
+					curr_offset += step;
+				}
+			}
+		}
+		createGraphHLine(G,curr_offset+step, 0.1, 1);
+
+		chan_analysis.tab.addEventListener('cbi-tab-active', L.bind(function(ev) {
+			this.active_tab = ev.detail.tab;
+			if (!this.radios[this.active_tab].loadedOnce)
+				poll.start();
+		}, this));
+	},
+
+	handleScanRefresh() {
+		if (!this.active_tab)
+			return;
+
+		const radio = this.radios[this.active_tab];
+
+		if (!radio)
+			return;
+
+		let q;
+
+		/* 【C2000 改动】本机 radio0/radio1 共用 phy0，iwinfo 会把 radioN 一律
+		 * 解析成该 phy 的第一个 vif（phy0.0-ap0，2.4GHz）。所以这里不能用
+		 * radio.dev.getName()，必须用该频段真正在用的 vif 名，否则 5GHz tab
+		 * 拿到的永远是 2.4GHz 接口的 channel=1，本地接口行永远画不出来。 */
+		const infoDev = radio.ifname || radio.dev.getName();
+
+		/* 【C2000 修复】接口没起来时 iwinfo scan 直接回 -EBUSY/ENODEV，info 也可能
+		 * 拿不到 bssid；上游让 Promise.all reject，整个 tab 就永远停在
+		 * 「正在扫描无线网络…」。这里逐项降级，保证下面的本地接口兜底还能跑。 */
+		return Promise.all([
+			this.callScanList(infoDev).catch(function() { return []; }),
+			this.callInfo(infoDev).catch(function() { return {}; })
+		]).then(L.bind(function([results, local_wifi]) {
+			const table = radio.table;
+			const chan_analysis = radio.graph;
+			const scanCache = radio.scanCache;
+			const band = radio.band;
+
+			results = results || [];
+			local_wifi = local_wifi || {};
+
+			const rows = [];
+			let neighbor_count = 0;
+
+			/* 'EHT160' / 'HE80' / 'VHT40' / 'HT20' → '160' / '80' / '40' / '20' */
+			const local_width = function(mode) {
+				const m = String(mode || '').match(/(\d{2,3})/);
+				return m ? m[1] : '';
+			};
+
+			for (let res of results) {
+				if (scanCache[res.bssid] == null)
+					scanCache[res.bssid] = {};
+
+				scanCache[res.bssid].data = res;
+				scanCache[res.bssid].data.stale = false;
+			}
+
+			if (band + 'g' == radio.dev.get('band')) {
+				/* 接口挂掉时 iwinfo 可能连 bssid 都不给，用固定 key 兜住 */
+				const local_key = local_wifi.bssid || ('local-' + band);
+
+				if (scanCache[local_key] == null)
+					scanCache[local_key] = {};
+
+				scanCache[local_key].data = local_wifi;
+
+				if (scanCache[local_key].color == null)
+					scanCache[local_key].color = random.derive_color(local_key);
+
+				/* 【C2000 修复】接口没起起来时 iwinfo 只回 channel=0、
+				 * center_chan1 缺省（最典型的就是 160MHz 在没设国家码时被
+				 * hostapd 直接拒绝启用）。上游拿 center_chan1 当硬门槛，
+				 * 这种时候会把「本地接口」整行丢掉，页面看上去就是
+				 * 「5GHz 看不到本机信道」。这里改成两级降级：
+				 *   1) 实测值完整 → 照常画柱状图 + 表格行
+				 *   2) 实测值不完整 → 退到 uci 里配置的 channel/htmode，
+				 *      只出表格行并标注未生效（不画图，避免坐标算成 NaN）
+				 * 另外 channel 不在本 tab 频点表里（offset_tbl 无键）时也
+				 * 只出行、不画图。 */
+				const live_chan = parseInt(local_wifi.channel) || 0;
+				const cfg_chan = parseInt(radio.dev.get('channel')) || 0;
+
+				if (live_chan > 0 && local_wifi.center_chan1 &&
+				    chan_analysis.offset_tbl[live_chan] != null) {
+					const center_channels = [local_wifi.center_chan1];
+					const chan_width_text = local_width(local_wifi.htmode);
+					let chan_width = parseInt(chan_width_text)/10;
+
+					if (local_wifi.center_chan2) {
+						center_channels.push(local_wifi.center_chan2);
+						chan_width = 8;
+					}
+
+					local_wifi.signal = -10;
+					local_wifi.ssid = 'Local Interface';
+
+					this.add_wifi_to_graph(chan_analysis, local_wifi, scanCache, center_channels, chan_width);
+					rows.push([
+						this.render_signal_badge(q, local_wifi.signal),
+						[
+							E('span', { 'style': 'color:'+scanCache[local_key].color }, '⬤ '),
+							local_wifi.ssid
+						],
+						'%d'.format(local_wifi.channel),
+						'%h MHz'.format(chan_width_text),
+						'%h'.format(local_wifi.mode),
+						'%h'.format(local_wifi.bssid)
+					]);
+				}
+				else {
+					/* 降级行：接口没生效也要让用户看到本机配置的信道 */
+					const chan = live_chan || cfg_chan;
+					const width_text = local_width(local_wifi.htmode) ||
+					                   local_width(radio.dev.get('htmode'));
+
+					if (chan > 0) {
+						rows.push([
+							/* 接口没生效，没有可信信号值，别硬编一个 dBm 出来 */
+							E('span', { 'style': 'opacity:0.5', 'title': _('Interface is not running') }, '—'),
+							[
+								E('span', { 'style': 'color:'+scanCache[local_key].color }, '⬤ '),
+								E('span', {}, [
+									'Local Interface',
+									E('em', { 'style': 'opacity:0.75' }, ' (%s)'.format(_('not active')))
+								])
+							],
+							'%d'.format(chan),
+							width_text ? '%h MHz'.format(width_text) : '%h'.format(_('unknown')),
+							'%h'.format(local_wifi.mode || 'Master'),
+							'%h'.format(local_wifi.bssid || '')
+						]);
+					}
+				}
+			}
+
+			for (let k in scanCache)
+				if (scanCache[k].data.stale)
+					results.push(scanCache[k].data);
+
+			results.sort(function(a, b) {
+				if (a.channel - b.channel)
+					return 1;
+
+				if (a.ssid < b.ssid)
+					return -1;
+				else if (a.ssid > b.ssid)
+					return 1;
+
+				if (a.bssid < b.bssid)
+					return -1;
+				else if (a.bssid > b.bssid)
+					return 1;
+			});
+
+			for (let res of results) {
+				const qv = res.quality || 0;
+				const qm = res.quality_max || 0;
+				q = (qv > 0 && qm > 0) ? Math.floor((100 / qm) * qv) : 0;
+				const s = res.stale ? 'opacity:0.5' : '';
+				const center_channels = [res.channel];
+				let chan_width = 2;
+
+				/* Skip WiFi not supported by the current band */
+				if (band != res.band)
+					continue;
+				if (chan_analysis.offset_tbl[res.channel] == null)
+					continue;
+
+				res.channel_width = "20 MHz";
+				if (res.ht_operation != null) {
+					/* Detect 40 MHz operation by looking for the presence of
+					 * a secondary channel. */
+					if (res.ht_operation.secondary_channel_offset == "below") {
+						res.channel_width = "40 MHz";
+						chan_width = 4; /* 40 MHz Channel Used */
+						center_channels[0] -= 2;
+					} else if (res.ht_operation.secondary_channel_offset == "above") {
+						res.channel_width = "40 MHz";
+						chan_width = 4; /* 40 MHz Channel Used */
+						center_channels[0] += 2;
+					} else {
+						/* Fallback to 20 MHz due to discovery of other APs on the
+						 * same channel (802.11n coexistence mechanism). */
+						if (res.ht_operation.channel_width == 2040)
+							res.channel_width = "20 MHz (40 MHz Intolerant)";
+					}
+				}
+
+				/* if channel_width <= 40, refer to HT (above) for actual channel width,
+				 * as vht_operation.channel_width == 40 really only means that the used
+				 * bandwidth is <= 40 and could be 20 Mhz as well */
+				if (res.vht_operation?.channel_width > 40) {
+					center_channels[0] = res.vht_operation.center_freq_1;
+					if (res.vht_operation.channel_width == 80) {
+						chan_width = 8;
+						res.channel_width = "80 MHz";
+
+						/* If needed, adjust based on the 802.11ac Wave 2 interop workaround. */
+						if (res.vht_operation.center_freq_2) {
+							const diff = Math.abs(res.vht_operation.center_freq_2 -
+							                    res.vht_operation.center_freq_1);
+
+							if (diff == 8) {
+								chan_width = 16;
+								res.channel_width = "160 MHz";
+								center_channels.push(res.vht_operation.center_freq_2);
+							} else if (diff > 8) {
+								chan_width = 8;
+								res.channel_width = "80+80 MHz";
+								center_channels.push(res.vht_operation.center_freq_2);
+							}
+						}
+					} else if (res.vht_operation.channel_width == 8080) {
+						res.channel_width = "80+80 MHz";
+						chan_width = 8;
+						center_channels.push(res.vht_operation.center_freq_2);
+					} else if (res.vht_operation.channel_width == 160) {
+						res.channel_width = "160 MHz";
+						chan_width = 16;
+					}
+				}
+
+				if (res.he_operation?.channel_width > 20) {
+					center_channels[0] = res.he_operation.center_freq_1;
+					chan_width = res.he_operation.channel_width / 10;
+					switch (res.he_operation.channel_width) {
+						case 40:
+							res.channel_width = "40 MHz";
+							break;
+						case 80:
+							res.channel_width = "80 MHz";
+							break;
+						case 160:
+							res.channel_width = "160 MHz";
+							center_channels.push(res.he_operation.center_freq_2);
+							break;
+					}
+				}
+
+				if (res.eht_operation?.channel_width == 320) {
+					chan_width = 32;
+					res.channel_width = "320 MHz";
+					center_channels.push(res.eht_operation.center_freq_2);
+				}
+
+				this.add_wifi_to_graph(chan_analysis, res, scanCache, center_channels, chan_width);
+
+				rows.push([
+					E('span', { 'style': s }, this.render_signal_badge(q, res.signal)),
+					E('span', { 'style': s }, [
+						E('span', { 'style': 'color:'+scanCache[res.bssid].color }, '⬤ '),
+						(res.ssid != null) ? '%h'.format(res.ssid) : E('em', _('hidden'))
+					]),
+					E('span', { 'style': s }, '%d'.format(res.channel)),
+					E('span', { 'style': s }, '%h'.format(res.channel_width)),
+					E('span', { 'style': s }, '%h'.format(res.mode)),
+					E('span', { 'style': s }, '%h'.format(res.bssid))
+				]);
+
+				scanCache[res.bssid].data.stale = true;
+				neighbor_count++;
+			}
+
+			/* 【C2000 新增】160MHz 下扫不到邻居是硬限制，不是页面坏了：
+			 * 160MHz 的 ch36 信道定义（5170-5330）必然包含 ch52-64 这段 DFS，
+			 * mac80211 开着雷达检测就不允许 off-channel 扫描，iwinfo scan 直接
+			 * 回 -EBUSY。这里给一句说明，免得用户以为 5G tab 是空的。 */
+			if (radio.note) {
+				const lw = parseInt(local_width(local_wifi.htmode)) || 0;
+
+				if (neighbor_count == 0 && lw >= 160) {
+					radio.note.textContent = _('Neighbour scan is unavailable on a 160 MHz channel: it overlaps DFS bands, so the driver refuses off-channel scanning while the AP is running.');
+					radio.note.style.display = '';
+				}
+				else {
+					radio.note.textContent = '';
+					radio.note.style.display = 'none';
+				}
+			}
+
+			cbi_update_table(table, rows);
+
+			if (!radio.loadedOnce) {
+				radio.loadedOnce = true;
+				poll.stop();
+			}
+		}, this))
+	},
+
+	radios: {},
+
+	loadSVG(src) {
+		return request.get(src).then(function(response) {
+			if (!response.ok)
+				throw new Error(response.statusText);
+
+			return E('div', {
+				'id': 'channel_graph',
+				'style': 'width:100%;height:400px;border:1px solid #000;background:#fff'
+			}, E(response.text()));
+		});
+	},
+
+	load() {
+		return Promise.all([
+			this.loadSVG(L.resource('svg/channel_analysis.svg')),
+			network.getWifiDevices().then(L.bind(function(data) {
+				const tasks = [], ret = [];
+
+				for (let d of data) {
+					ret[d.getName()] = { dev : d };
+
+					tasks.push(this.callFrequencyList(d.getName())
+					.then(L.bind(function(radio, data) {
+						ret[radio.getName()].freq = data;
+					}, this, d)));
+				}
+
+				return Promise.all(tasks).then(function() { return ret; })
+			}, this)),
+			/* 【C2000 新增】需要知道每个频段实际在用的 vif 名（phy0.0-ap0 /
+			 * phy0.1-ap0），才能取到正确的「本地接口」信息。取不到时降级为空数组，
+			 * 退化成上游行为，不至于整页打不开。 */
+			network.getWifiNetworks().catch(function() { return []; })
+		]);
+	},
+
+	render([svg, wifiDevs, wifiNets]) {
+		const h2 = E('div', {'class' : 'cbi-title-section'}, [
+			E('h2', {'class': 'cbi-title-field'}, [ _('Channel Analysis') ]),
+			E('div', {'class': 'cbi-title-buttons'  }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-edit',
+					'click': ui.createHandlerFn(this, 'handleScanRefresh')
+				}, [ _('Refresh Channels') ])])
+			]);
+
+		const tabs = E('div', {}, E('div'));
+
+		/* 【C2000 改动】上游按「radio × band」交叉生成 tab：iwinfo 的 freqlist 对
+		 * 每个 radio 都返回该 phy 的全部频段，而本机 radio0/radio1 共用同一个
+		 * phy0，于是会生成 4 个 tab、其中两两内容完全重复；更糟的是 iwinfo 会把
+		 * radio1 也解析成 2.4GHz 的 phy0.0-ap0，两个 5GHz tab 连「本地接口」行都
+		 * 画不出来，永远停在「无数据」。
+		 * 这里改成按频段聚合：一个频段一个 tab，扫描用该频段对应的 radio，本地接口
+		 * 信息用该频段真正在用的 vif（phy0.0-ap0 / phy0.1-ap0）。 */
+
+		const band_titles = { 2: '2.4GHz', 5: '5GHz', 6: '6GHz' };
+
+		/* 频段 → 该频段实际在用的 vif */
+		const band_iface = {};
+
+		for (const net of (wifiNets || [])) {
+			if (net.isDisabled())
+				continue;
+
+			const rname = net.getWifiDeviceName();
+			const netdev = rname ? ((wifiDevs[rname] || {}).dev || null) : null;
+
+			if (!netdev)
+				continue;
+
+			const b = String(netdev.get('band') || '').replace(/g$/, '');
+
+			if (!b || band_iface[b])
+				continue;
+
+			band_iface[b] = { dev: netdev, ifname: net.getIfname() };
+		}
+
+		/* 频段 → 频点列表（多个 radio 报同一 phy 的频点时去重） */
+		const band_channels = {};
+
+		for (let ifname in wifiDevs)
+			for (const freq of (wifiDevs[ifname].freq || [])) {
+				const b = String(freq.band);
+
+				if (!band_channels[b])
+					band_channels[b] = [];
+
+				if (band_channels[b].indexOf(freq.channel) < 0)
+					band_channels[b].push(freq.channel);
+			}
+
+		const dev_names = Object.keys(wifiDevs);
+		const fallback_dev = dev_names.length ? wifiDevs[dev_names[0]].dev : null;
+
+		for (const band of Object.keys(band_channels).sort(function(a, b) { return a - b; })) {
+			const channels = band_channels[band].sort(function(a, b) { return a - b; });
+			const src = band_iface[band] || {};
+			const dev = src.dev || fallback_dev;
+
+			if (!dev || channels.length == 0)
+				continue;
+
+			const tabid = 'band'+band;
+			const csvg = svg.cloneNode(true);
+			const table = E('table', { 'class': 'table' }, [
+				E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th col-2 middle center' }, _('Signal')),
+					E('th', { 'class': 'th col-4 middle left' }, _('SSID')),
+					E('th', { 'class': 'th col-2 middle center hide-xs' }, _('Channel')),
+					E('th', { 'class': 'th col-3 middle left' }, _('Channel Width')),
+					E('th', { 'class': 'th col-2 middle left hide-xs' }, _('Mode')),
+					E('th', { 'class': 'th col-3 middle left hide-xs' }, _('BSSID'))
+				])
+			]);
+			/* 【C2000 新增】提示区：160MHz 时扫不到邻居的说明放这里 */
+			const note = E('div', {
+				'class': 'cbi-value-description',
+				'style': 'display:none;color:#f0a020;padding:4px 2px'
+			});
+			const tab = E('div', { 'data-tab': tabid, 'data-tab-title': (band_titles[band] || band+'GHz') },
+					[E('br'),csvg,note,E('br'),table,E('br')]);
+			const graph_data = {
+				graph: csvg,
+				offset_tbl: {},
+				col_width: 0,
+				tab: tab,
+			};
+
+			this.radios[tabid] = {
+				dev: dev,
+				ifname: src.ifname || dev.getName(),
+				band: band,
+				graph: graph_data,
+				table: table,
+				note: note,
+				scanCache: {},
+				loadedOnce: false,
+			};
+
+			cbi_update_table(table, [], E('em', { class: 'spinning' }, _('Starting wireless scan...')));
+
+			tabs.firstElementChild.appendChild(tab);
+
+			requestAnimationFrame(L.bind(this.create_channel_graph, this, graph_data, channels, band));
+		}
+
+		ui.tabs.initTabGroup(tabs.firstElementChild.childNodes);
+
+		this.pollFn = L.bind(this.handleScanRefresh, this);
+		poll.add(this.pollFn);
+
+		return E('div', {}, [h2, tabs]);
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
+});

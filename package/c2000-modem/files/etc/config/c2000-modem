@@ -1,0 +1,21 @@
+config sim 'sim'
+	# 当前选中的 SIM 卡位（1/2/3…）—— 卡位数量和映射不在这里，
+	# 运行时从原厂分区 /mnt/mmcblk0p1/upper/etc/config/cpesel 的
+	# max / gval / stype 读（原厂只读，我们不写它）。
+	option slot '1'
+
+	# 0 = 自动：上不了网时自动轮询找能上网的卡（刷入首启没有网，会自动跑一次）
+	# 1 = 手动：只在页面点选卡位，且**不会**自动回滚
+	option mode '0'
+
+	# 自动模式最多轮询几轮（一轮 = 从卡位 1 试到最后一张）
+	option rounds '3'
+
+	# 自动模式一轮全失败后的冷却时间（秒），避免一直拨 GPIO 折腾模组
+	option cooldown '600'
+
+# MT5700M-CN 不会自己建默认承载，必须由主机显式发 AT^NDISDUP 才会出现
+# 10.x 地址和默认路由。这张卡（898604891625D0016300，中移动物联网）实测
+# 用 cmnet 能激活；激活后模组 ^DSAMBR 上报的实际 APN 是 CMIOT5G。
+config modem 'modem'
+	option apn 'cmnet'
