@@ -22,12 +22,6 @@ return view.extend({
 		expect: { }
 	}),
 
-	/* 【C2000 新增】必须能指定用哪个 vif 触发扫描。
-	 * 本机 mt76 的扫描只覆盖「发起扫描那个 vif 所在的频段」：
-	 *   从 phy0.0-ap0（2.4G）发起 → 1.1 s，结果里一条 5G 都没有
-	 *   从 phy0.1-ap0（5G）发起  → 2.9 s，能扫到 5G AP
-	 * 而 iwinfo 把 radio0/radio1 都解析成 2.4G 的 phy0.0-ap0，
-	 * 所以上游的 dev.getScanList()（内部就是 iwinfo scan radioN）永远扫不到 5G。 */
 	callScanList: rpc.declare({
 		object: 'iwinfo',
 		method: 'scan',
@@ -218,15 +212,8 @@ return view.extend({
 
 		let q;
 
-		/* 【C2000 改动】本机 radio0/radio1 共用 phy0，iwinfo 会把 radioN 一律
-		 * 解析成该 phy 的第一个 vif（phy0.0-ap0，2.4GHz）。所以这里不能用
-		 * radio.dev.getName()，必须用该频段真正在用的 vif 名，否则 5GHz tab
-		 * 拿到的永远是 2.4GHz 接口的 channel=1，本地接口行永远画不出来。 */
 		const infoDev = radio.ifname || radio.dev.getName();
 
-		/* 【C2000 修复】接口没起来时 iwinfo scan 直接回 -EBUSY/ENODEV，info 也可能
-		 * 拿不到 bssid；上游让 Promise.all reject，整个 tab 就永远停在
-		 * 「正在扫描无线网络…」。这里逐项降级，保证下面的本地接口兜底还能跑。 */
 		return Promise.all([
 			this.callScanList(infoDev).catch(function() { return []; }),
 			this.callInfo(infoDev).catch(function() { return {}; })
@@ -257,7 +244,7 @@ return view.extend({
 			}
 
 			if (band + 'g' == radio.dev.get('band')) {
-				/* 接口挂掉时 iwinfo 可能连 bssid 都不给，用固定 key 兜住 */
+
 				const local_key = local_wifi.bssid || ('local-' + band);
 
 				if (scanCache[local_key] == null)
@@ -268,16 +255,6 @@ return view.extend({
 				if (scanCache[local_key].color == null)
 					scanCache[local_key].color = random.derive_color(local_key);
 
-				/* 【C2000 修复】接口没起起来时 iwinfo 只回 channel=0、
-				 * center_chan1 缺省（最典型的就是 160MHz 在没设国家码时被
-				 * hostapd 直接拒绝启用）。上游拿 center_chan1 当硬门槛，
-				 * 这种时候会把「本地接口」整行丢掉，页面看上去就是
-				 * 「5GHz 看不到本机信道」。这里改成两级降级：
-				 *   1) 实测值完整 → 照常画柱状图 + 表格行
-				 *   2) 实测值不完整 → 退到 uci 里配置的 channel/htmode，
-				 *      只出表格行并标注未生效（不画图，避免坐标算成 NaN）
-				 * 另外 channel 不在本 tab 频点表里（offset_tbl 无键）时也
-				 * 只出行、不画图。 */
 				const live_chan = parseInt(local_wifi.channel) || 0;
 				const cfg_chan = parseInt(radio.dev.get('channel')) || 0;
 
@@ -309,14 +286,14 @@ return view.extend({
 					]);
 				}
 				else {
-					/* 降级行：接口没生效也要让用户看到本机配置的信道 */
+
 					const chan = live_chan || cfg_chan;
 					const width_text = local_width(local_wifi.htmode) ||
 					                   local_width(radio.dev.get('htmode'));
 
 					if (chan > 0) {
 						rows.push([
-							/* 接口没生效，没有可信信号值，别硬编一个 dBm 出来 */
+
 							E('span', { 'style': 'opacity:0.5', 'title': _('Interface is not running') }, '—'),
 							[
 								E('span', { 'style': 'color:'+scanCache[local_key].color }, '⬤ '),
@@ -462,10 +439,6 @@ return view.extend({
 				neighbor_count++;
 			}
 
-			/* 【C2000 新增】160MHz 下扫不到邻居是硬限制，不是页面坏了：
-			 * 160MHz 的 ch36 信道定义（5170-5330）必然包含 ch52-64 这段 DFS，
-			 * mac80211 开着雷达检测就不允许 off-channel 扫描，iwinfo scan 直接
-			 * 回 -EBUSY。这里给一句说明，免得用户以为 5G tab 是空的。 */
 			if (radio.note) {
 				const lw = parseInt(local_width(local_wifi.htmode)) || 0;
 
@@ -519,9 +492,7 @@ return view.extend({
 
 				return Promise.all(tasks).then(function() { return ret; })
 			}, this)),
-			/* 【C2000 新增】需要知道每个频段实际在用的 vif 名（phy0.0-ap0 /
-			 * phy0.1-ap0），才能取到正确的「本地接口」信息。取不到时降级为空数组，
-			 * 退化成上游行为，不至于整页打不开。 */
+
 			network.getWifiNetworks().catch(function() { return []; })
 		]);
 	},
@@ -538,17 +509,8 @@ return view.extend({
 
 		const tabs = E('div', {}, E('div'));
 
-		/* 【C2000 改动】上游按「radio × band」交叉生成 tab：iwinfo 的 freqlist 对
-		 * 每个 radio 都返回该 phy 的全部频段，而本机 radio0/radio1 共用同一个
-		 * phy0，于是会生成 4 个 tab、其中两两内容完全重复；更糟的是 iwinfo 会把
-		 * radio1 也解析成 2.4GHz 的 phy0.0-ap0，两个 5GHz tab 连「本地接口」行都
-		 * 画不出来，永远停在「无数据」。
-		 * 这里改成按频段聚合：一个频段一个 tab，扫描用该频段对应的 radio，本地接口
-		 * 信息用该频段真正在用的 vif（phy0.0-ap0 / phy0.1-ap0）。 */
-
 		const band_titles = { 2: '2.4GHz', 5: '5GHz', 6: '6GHz' };
 
-		/* 频段 → 该频段实际在用的 vif */
 		const band_iface = {};
 
 		for (const net of (wifiNets || [])) {
@@ -569,7 +531,6 @@ return view.extend({
 			band_iface[b] = { dev: netdev, ifname: net.getIfname() };
 		}
 
-		/* 频段 → 频点列表（多个 radio 报同一 phy 的频点时去重） */
 		const band_channels = {};
 
 		for (let ifname in wifiDevs)
@@ -606,7 +567,7 @@ return view.extend({
 					E('th', { 'class': 'th col-3 middle left hide-xs' }, _('BSSID'))
 				])
 			]);
-			/* 【C2000 新增】提示区：160MHz 时扫不到邻居的说明放这里 */
+
 			const note = E('div', {
 				'class': 'cbi-value-description',
 				'style': 'display:none;color:#f0a020;padding:4px 2px'

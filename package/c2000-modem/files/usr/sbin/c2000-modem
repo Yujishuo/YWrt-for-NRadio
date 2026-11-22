@@ -1,30 +1,4 @@
 #!/bin/sh
-#
-# c2000-modem —— NRadio C2000 Ultra（HC-WT9500）5G 模组辅助工具
-#
-#   c2000-modem status          输出一行 JSON 状态（LuCI/rpcd 用）
-#   c2000-modem at "AT+CSQ"     向模组 AT 口发一条命令并打印应答
-#   c2000-modem reconnect       重置 wwan 接口（重新 DHCP 拨号）
-#   c2000-modem iface           打印当前识别到的模组网卡名
-#   c2000-modem atport          打印当前识别到的 AT 口
-#   c2000-modem daemon          常驻：维护 wwan、刷新状态、驱动信号灯
-#   c2000-modem switch sd|nor   切换 u-boot 启动介质（SD 系统 / 厂商 NOR 系统）
-#   c2000-modem siminfo         输出 SIM 卡位 JSON（含卡列表/模式/轮询状态）
-#   c2000-modem simcards        只输出卡位数组
-#   c2000-modem simswitch N [auto|manual]  切到卡位 N（后台干活，立即返回）
-#   c2000-modem simauto [prev]  自动轮询：卡位 1..N 逐个试，最多 rounds 轮
-#   c2000-modem simstop         停止正在跑的自动轮询
-#   c2000-modem simsetmode 0|1  0=自动 1=手动
-#   c2000-modem simprobe        探测当前是否能上网
-#
-# 卡位数量不写死：运行时从原厂分区 /mnt/mmcblk0p1/upper/etc/config/cpesel 读
-# max/gval/stype，读不到才用内置默认（3 张卡，'0-2,1-1,1-2'）。原厂分区只读。
-#
-# 说明：MT5700M-CN 是 USB 复合设备（3466:3301），网络侧是 NCM/RNDIS，
-# 模组自己完成 PDP 拨号并下发 DHCP，所以系统侧只需要一个 dhcp 协议的 wwan 接口。
-#
-# 注意：`.` 在 dash/ash 里是"特殊内建"，文件不存在会让整个 shell 直接退出，
-# 所以必须先判断存在性 —— 否则在非 OpenWrt 环境里 source 本脚本会静默全灭。
 [ -r /lib/functions.sh ] && . /lib/functions.sh
 
 STATEDIR=/tmp/c2000-modem
@@ -36,9 +10,6 @@ log() { logger -t c2000-modem "$*" 2>/dev/null; }
 
 mkdir -p "$STATEDIR"
 
-########################################
-# USB / 网卡 / AT 口探测
-########################################
 usb_devs() {
 	local d v p id
 	for d in /sys/bus/usb/devices/*; do
@@ -70,13 +41,6 @@ find_netif() {
 	return 1
 }
 
-# at_run <port> <command> [loops]
-# 注意 1：模组会持续刷 ^RSSI/^HCSQ 这类 URC，多个进程同时读同一个串口会串扰，
-#         所以这里用一把文件锁把「打开串口→发命令→收应答」整段串起来。
-# 注意 2：一看到 OK / ERROR / +CME ERROR 就立刻返回，别傻等满 loops 轮。
-#         以前不提前退出，一条命令固定耗 loops 秒，siminfo 连发 4~5 条就是 20 多秒，
-#         直接把 LuCI 的 XHR 拖超时（页面上表现为 "Error / XHR request timed out"）。
-#         loops 现在只当「最多等多少秒」用。
 at_run() {
 	local port="$1" cmd="$2" loops="${3:-3}"
 	(
@@ -86,15 +50,6 @@ at_run() {
 		flock -x 200 2>/dev/null
 		exec 3<>"$port" 2>/dev/null || exit 1
 		stty -F "$port" 115200 cs8 -cstopb -parenb -echo raw 2>/dev/null
-		# 【2026-11-09】写之前先把 tty 里残留的内容读干净。
-		# 不清的话会出现「永久差一条」：上一条命令的应答（或它的 URC）还躺在
-		# 缓冲里，被当成这条命令的应答返回，而这条的应答又留给下一条。
-		# 实测症状：`AT+CGMM` 回 "+CPIN: READY"、`AT+CPIN?` 回 "MT5700M-CN"、
-		# `AT^HCSQ?` 回 "+CPIN: READY"、`AT+CGREG?` 回 ^HCSQ —— 整条链错一位，
-		# 于是 status 里 sim/csq/dbm/sinr/reg 全空、model 变成 "+CPIN: READY"。
-		# 种子通常是射频复位（CFUN=0/1）连发的一串 URC。
-		# `read -t 0` 是非阻塞的（busybox 支持），有数据立刻返回，没数据立刻失败；
-		# 上限 32 行防止 URC 持续涌入时死循环。
 		drain=0
 		while [ "$drain" -lt 32 ] && IFS= read -r -t 0 _junk <&3; do
 			drain=$((drain + 1))
@@ -105,9 +60,6 @@ at_run() {
 		i=0
 		while [ "$i" -lt "$loops" ]; do
 			if IFS= read -r -t 1 line <&3; then
-				# 读回来的一行末尾带 \r，不先剥掉的话 "OK\r" 永远匹配不上 OK，
-				# 循环就只能一直跑满 loops 轮（loops 秒），这是之前每条 AT
-				# 命令固定耗 4 秒、siminfo 拖到 16 秒的根因。
 				line=${line%"$CR"}
 				printf '%s\n' "$line"
 				case "$line" in
@@ -138,26 +90,10 @@ find_at() {
 	return 1
 }
 
-########################################
-# SIM 卡位（板级 cpe-sel0 + 模组 AT^SCICHG）
-########################################
-# 卡位定义**不再写死**，运行时从原厂分区的 /etc/config/cpesel 读（见下面 sim_bank_*）。
-# 出厂值是 gval='0-2,1-1,1-2'（每卡位一对 <cpe-sel0 电平>-<模组 usim 值>）：
-#
-#   卡位 1：cpe-sel0=0，usim=2  →  AT^SCICHG=1,0
-#   卡位 2：cpe-sel0=1，usim=1  →  AT^SCICHG=0,1
-#   卡位 3：cpe-sel0=1，usim=2  →  AT^SCICHG=1,0
-#
-# 模组命令的规则出自原厂 /etc/cpetools/huawei.sh 的 command_huawei_usim_set：
-#   val = usim - 1；val2 默认 1，但 val==1 时取 0
-# 切完之后必须复位模组（CFUN=1,1），否则 SIM 接口不会重新初始化。
-
 sim_slot_cfg() {
 	local s
 	s=$(uci -q get c2000-modem.sim.slot 2>/dev/null)
 	case "$s" in ''|*[!0-9]*) s=1 ;; esac
-	# 卡数量由原厂配置决定，可能变少（比如厂商从 3 张改成 2 张）。
-	# 配到越界值时不要拿非法卡位去写 cpe-sel0，直接按 1 处理。
 	sim_bank_load
 	if [ "$s" -lt 1 ] || [ "$s" -gt "$SIM_MAX" ]; then
 		log "配置卡位 $s 超出 1..$SIM_MAX，按卡位 1 处理"
@@ -166,14 +102,12 @@ sim_slot_cfg() {
 	echo "$s"
 }
 
-# 0 = 自动（上不了网就轮询找卡），1 = 手动（只切、不回滚）。默认 0。
 sim_mode_cfg() {
 	local m
 	m=$(uci -q get c2000-modem.sim.mode 2>/dev/null)
 	case "$m" in 0|1) echo "$m" ;; *) echo 0 ;; esac
 }
 
-# 自动模式最多轮询几轮（轮 = 把所有卡各试一遍）
 sim_rounds_cfg() {
 	local r
 	r=$(uci -q get c2000-modem.sim.rounds 2>/dev/null)
@@ -183,7 +117,6 @@ sim_rounds_cfg() {
 	echo "$r"
 }
 
-# 自动轮询冷却（秒）。一轮全失败后不要立刻重来，否则会一直拨 GPIO 折腾模组。
 sim_cooldown_cfg() {
 	local c
 	c=$(uci -q get c2000-modem.sim.cooldown 2>/dev/null)
@@ -191,20 +124,6 @@ sim_cooldown_cfg() {
 	echo "$c"
 }
 
-########################################
-# 卡位表：从原厂分区读，**永不写**
-########################################
-# 原厂把它的 overlay 放在 SD 的 p1 上（upper/ + work/），卡位定义就是
-#   /mnt/mmcblk0p1/upper/etc/config/cpesel
-# 字段语义照原厂 luci.nradio / cbi/nradio_cellular/switch.lua：
-#   max    '3'              卡数量 —— 不写死在程序里，厂商改了这里就跟着变
-#   gval   '0-2,1-1,1-2'    每张卡一对 <cpe-sel0 电平>-<模组 usim 值>
-#   stype  '0,0,4'          0=卡槽 1=内置移动 2=内置联通 3=内置电信 4=内置eSIM
-#   mode   '0'              原厂自己的 0=自动/1=手动，只读来参考，状态存我们自己这边
-#   cur / default           原厂记的当前/默认卡位
-#
-# p1 走 fstab 的 anon_mount（delay_root 5s 才挂），所以不能假设它一定挂好了；
-# 三个来源依次回落，最后才是内置默认表（与原厂出厂值一致）。
 SIM_MAX=0
 SIM_GVAL=""
 SIM_STYPE=""
@@ -214,7 +133,6 @@ SIM_SRC=""
 
 sim_bank_file() {
 	local f
-	# 测试/排障用：指定具体文件（正常运行时不用设）
 	if [ -n "${CPESEL_FILE:-}" ] && [ -s "$CPESEL_FILE" ]; then
 		echo "$CPESEL_FILE"
 		return 0
@@ -235,8 +153,6 @@ sim_bank_load() {
 	f=$(sim_bank_file 2>/dev/null) || f=""
 
 	if [ -n "$f" ]; then
-		# 只取 `config cpesel 'sim'` 这一段。值里除 [0-9A-Za-z,._-] 一律剥掉：
-		# 引号、行尾注释一次搞定，eval 进来的东西也不可能带 shell 元字符。
 		eval "$(awk '
 			{ sub(/#.*/, "") }
 			$1 == "config" {
@@ -262,7 +178,6 @@ sim_bank_load() {
 	[ "$max" -ge 1 ] 2>/dev/null || max=0
 	[ "$max" -le 8 ] 2>/dev/null || max=8
 
-	# 没有 max 说明这个文件没定义卡表（原厂出厂 squashfs 里只有 mode/cur）
 	if [ "$max" -eq 0 ]; then
 		max=3
 		gval="0-2,1-1,1-2"
@@ -270,7 +185,6 @@ sim_bank_load() {
 		SIM_SRC=""
 	fi
 
-	# gval/stype 不够就按内置默认补，绝不因为厂商少写一项就崩
 	newg=""; news=""
 	for i in $(seq 1 "$max"); do
 		g=$(echo "$gval" | cut -d, -f"$i")
@@ -293,7 +207,6 @@ sim_bank_load() {
 	return 0
 }
 
-# $1 = 卡位号 → "<cpe-sel0 电平>-<模组 usim 值>"
 sim_gval_of() {
 	sim_bank_load
 	echo "$SIM_GVAL" | cut -d, -f"${1:-1}"
@@ -311,7 +224,6 @@ sim_usim_val() {
 	echo "${g##*-}"
 }
 
-# 反查：当前 (电平, usim) 对应第几号卡位，对不上报 0
 sim_slot_of() {
 	local gpio="$1" usim="$2" i g
 	sim_bank_load
@@ -323,7 +235,6 @@ sim_slot_of() {
 	return 0
 }
 
-# 卡名照原厂 get_sim_alias 的规则：stype=0 的卡槽按出现顺序编号
 sim_slot_name() {
 	local s="${1:-0}" i t idx=0 name
 	sim_bank_load
@@ -354,7 +265,6 @@ sim_scichg() {
 	echo "$v,$v2"
 }
 
-# 卡位列表 → JSON 数组。前端据此渲染，卡数量完全由原厂配置决定。
 sim_cards_json() {
 	local i g t cur sep=""
 	sim_bank_load
@@ -372,11 +282,6 @@ sim_cards_json() {
 	printf ']\n'
 }
 
-# cpe-sel0 是 pinctrl 的第 48 号脚，物理编号 = gpiochip 基址 + 48。
-# 但本 BSP 树里 DTS 的 gpio_export 节点是**生效**的（debugfs 能看到
-# `gpio-560 (|cpe-sel0) out hi`），gpio-export 驱动已经按名字把它导出成
-# /sys/class/gpio/cpe-sel0，于是再往 /sys/class/gpio/export 写 560 会 EBUSY。
-# 所以优先用命名节点，拿不到才退回 base+48 的通用 export 路径。
 sim_gpio_dir() {
 	local n
 	if [ -d /sys/class/gpio/cpe-sel0 ]; then
@@ -415,8 +320,6 @@ sim_gpio_path() {
 sim_set_gpio() {
 	local level="$1" dir
 	dir=$(sim_gpio_dir) || { log "找不到 cpe-sel0 节点，无法切卡"; return 1; }
-	# gpio-export 建的节点只有 value（方向由 DTS 的 gpio-export,output 定死为 out），
-	# 通用 export 出来的才有 direction，有就顺手设一下。
 	[ -w "$dir/direction" ] && echo out > "$dir/direction" 2>/dev/null
 	echo "$level" > "$dir/value" 2>/dev/null
 	if [ "$(cat "$dir/value" 2>/dev/null)" != "$level" ]; then
@@ -434,7 +337,6 @@ sim_get_gpio() {
 	cat "$dir/value" 2>/dev/null
 }
 
-# AT 口探测比较慢（要逐个串口试），缓存起来
 cached_at() {
 	local p
 	p=$(cat "$STATEDIR/at" 2>/dev/null)
@@ -447,7 +349,6 @@ cached_at() {
 	echo "$p"
 }
 
-# 模组当前的 usim 值（AT^SCICHG? 第一个字段 + 1）
 sim_get_usim() {
 	local at out
 	at=${1:-$(cached_at)} || return 1
@@ -465,15 +366,6 @@ sim_at_value() {
 	at_run "$at" "$1" 4 | tr -d '\r' | grep -v '^AT' | grep -v '^$'
 }
 
-########################################
-# 数据承载（PDP）
-########################################
-# MT5700M-CN 附着（+CGATT: 1）之后不会自己建默认承载：+CGACT? 全是 0，
-# eth2 一直 NO-CARRIER，也就永远拿不到 IP。必须主机显式发
-#   AT^NDISDUP=1,1,"<apn>"
-# 才会出现 ^NDISSTAT: 1,1,,,"IPV4" / "IPV6"，NCM 口才 UP、才有 10.x 地址。
-# 断开用 AT^NDISDUP=1,0。复位射频之后承载会掉，所以每次切卡/复位后都要补拨。
-
 modem_apn() {
 	local a
 	a=$(uci -q get c2000-modem.modem.apn 2>/dev/null)
@@ -489,15 +381,6 @@ modem_carrier() {
 	cat "/sys/class/net/$netif/carrier" 2>/dev/null || echo 0
 }
 
-# modem_dial [atport] [tries]：承载没起来就拨，单次最多等 10 s，默认最多拨 2 次
-#
-# 【2026-11-16】必须重拨，一次不够。射频复位（CFUN=0→1）之后模组收到的
-# **第一条 AT^NDISDUP 不生效**：命令可能回 OK、也可能回 ERROR，但 carrier 一直
-# 为 0；紧接着再发一条同样的命令就激活了。实测证据：
-#   · 开机日志  02:09:09 拨第 1 次 → 等满 20 s 未激活；02:09:33 拨第 2 次 → 4 s 激活
-#   · v26 轮询  3 轮 × 2 张有卡可读的卡位（1、3）= 6 次「复位后首拨」全部失败
-# 所以这里不能只等得久，必须**再发一次命令**。tries 由调用方决定：
-# 切卡/轮询传 3（要一次成功），守护进程用默认 2 就够。
 modem_dial() {
 	local at="$1" tries="${2:-2}" apn i n=1 resp
 
@@ -532,9 +415,6 @@ modem_dial() {
 	return 1
 }
 
-########################################
-# 接口维护
-########################################
 ensure_iface() {
 	local netif cur
 	netif=$(find_netif) || return 1
@@ -555,9 +435,6 @@ ensure_iface() {
 	return 0
 }
 
-########################################
-# 状态采集
-########################################
 json_esc() {
 	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/ /g'
 }
@@ -572,7 +449,6 @@ csq_to_bars() {
 	fi
 }
 
-# 纯数字校验：AT 报文里偶尔混进制式名/空串，直接丢进 $(( )) 会报算术错误
 is_num() {
 	case "$1" in
 		''|*[!0-9]*) return 1 ;;
@@ -580,7 +456,6 @@ is_num() {
 	esac
 }
 
-# RSRP(dBm) → 信号格数（0~3）
 dbm_to_bars() {
 	[ -n "$1" ] || { echo 0; return; }
 	if   [ "$1" -ge -85 ]; then echo 3
@@ -589,41 +464,15 @@ dbm_to_bars() {
 	fi
 }
 
-# ---------------------------------------------------------------
-# 信号采集
-#
-# MT5700M-CN 的 AT+CSQ 在这个固件（V200R001C20B024）上只回一行空的
-# "+CSQ: "，永远读不到数值；唯一可用的信号源是 AT^HCSQ?。
-#
-# 字段表按鼎桥《MT5700M 5G 系列模组 AT 命令手册》13.5 节（各制式字段
-# 个数与顺序不同，别混用）：
-#   ^HCSQ: "NR",  <RSRP>, <SINR>, <RSRQ>
-#   ^HCSQ: "LTE", <RSSI>, <RSRP>, <SINR>, <RSRQ>
-#   ^HCSQ: "WCDMA", <RSSI>, <RSCP>, <Ec/Io>
-# 编码值换算：
-#   RSRP = -140 + n (dBm)     SINR = -20 + 0.2n (dB)
-#   RSRQ = -19.5 + 0.5n (dB)  RSSI/RSCP = -121 + n (dBm)
-#   255 = 未知/不可测
-# 实测本机 ^HCSQ: "NR",58,166,30 → RSRP -82 dBm / SINR 13.2 dB / RSRQ -4.5 dB
-# ---------------------------------------------------------------
 hcsq_fields() {
 	local at="$1"
 	at_run "$at" "AT^HCSQ?" 3 | tr -d '\r' | sed -n 's/^\^HCSQ: *//p' | head -1
 }
 
-# 十分之一单位整数运算，避免依赖 awk 浮点
 tenths_str() {
 	printf '%s.%s' "$(( $1 / 10 ))" "$( [ "$1" -lt 0 ] && echo $(( -$1 % 10 )) || echo $(( $1 % 10 )) )"
 }
 
-########################################
-# 签约速率（UE-AMBR）
-########################################
-# 本模组没有 `?` 查询形式（AT^DSAMBR? 回 ERROR），但 `AT^DSAMBR=<cid>`
-# 会把该承载的 AMBR 回出来：
-#   ^DSAMBR: 1,500000,60000,"CMIOT5G",5
-#   = cid, 下行 kbps, 上行 kbps, APN, 末位(承载/制式标记)
-# 只有 PDP 已激活（cid 1）才有值，未拨号时回 ERROR → 返回空。
 ambr_raw() {
 	at_run "$1" "AT^DSAMBR=1" 3 | tr -d '\r' | sed -n 's/^\^DSAMBR: *//p' | head -1
 }
@@ -642,25 +491,12 @@ ambr_json() {
 	is_num "$dl"  || dl=0
 	is_num "$ul"  || ul=0
 
-	# 上游没分配时可能回 0,0，当成没有
 	[ "$dl" = 0 ] && [ "$ul" = 0 ] && { printf 'null'; return; }
 
 	printf '{"cid":%s,"dl_kbps":%s,"ul_kbps":%s,"apn":"%s"}' \
 		"$cid" "$dl" "$ul" "$(json_esc "$apn")"
 }
 
-########################################
-# 载波聚合
-########################################
-# AT^HFREQINFO? 回：
-#   ^HFREQINFO: <mode>,<每组字段数>,<band>,<dl_arfcn>,<dl_freq_khz>,<dl_bw_khz>,
-#               <ul_arfcn>,<ul_freq_khz>,<ul_bw_khz>[,<band>,...]
-# 实测 <mode> 只是回显 AT^HFREQINFO= 设的值（0/1），每组固定 7 个字段，
-# 有几个组就是几个载波 —— 这就是聚合情况。
-#
-# 区分 NR / LTE：NR-ARFCN 与频率的关系是 freq_kHz = arfcn * 5，
-# LTE 的 EARFCN 不满足这个关系。实测 n41: 513000×5=2565000 ✓、
-# n28: 154600×5=773000 ✓，所以用它决定前缀是 n 还是 B。
 cells_raw() {
 	at_run "$1" "AT^HFREQINFO?" 3 | tr -d '\r' | sed -n 's/^\^HFREQINFO: *//p' | head -1
 }
@@ -670,7 +506,6 @@ cells_json() {
 
 	[ -n "$raw" ] || { printf '[]'; return; }
 
-	# shellcheck disable=SC2086
 	set -- $(printf '%s' "$raw" | tr ',' ' ')
 	[ $# -ge 3 ] || { printf '[]'; return; }
 
@@ -720,15 +555,9 @@ refresh_status() {
 
 	at=$(cached_at 2>/dev/null)
 	if [ -n "$at" ]; then
-		# 【2026-11-09】必须把 URC 也过滤掉：模组会随时插一帧主动上报
-		# （实测抓到 `^PLMN: 460,00`），它排在 AT+CGMM 的正常回显之后、
-		# 机型字符串之前，于是 "第一条非回显行" 就成了 URC，status 里
-		# model 显示成 `^PLMN:460,00`。凡是 `^` / `+` 开头的都是 URC 或
-		# 命令回执，不是机型串。
 		model=$(at_run "$at" "AT+CGMM" 3 | tr -d '\r' | grep -viE '^(AT|OK|$|[+^])' | head -1)
 		[ -n "$model" ] || model=$(at_run "$at" "ATI" 3 | tr -d '\r' | grep -viE '^(AT|OK|$|[+^])' | head -1)
 
-		# 先试标准 AT+CSQ（有的固件能回），拿不到就退回 ^HCSQ
 		csq=$(at_run "$at" "AT+CSQ" 3 | tr -d '\r' | sed -n 's/^+CSQ: *\([0-9]\{1,2\}\)[,[:space:]].*/\1/p' | head -1)
 		if [ -n "$csq" ] && [ "$csq" -ne 99 ] 2>/dev/null; then
 			dbm=$(( -113 + 2 * csq ))
@@ -742,11 +571,7 @@ refresh_status() {
 			[ -n "$C2000_DBG" ] && printf 'DBG hcsq=[%s] at=%s\n' "$hcsq" "$at" >> "$STATEDIR/dbg.log"
 			if [ -n "$hcsq" ]; then
 				mode=$(printf '%s' "$hcsq" | sed -n 's/^"\([^"]*\)".*/\1/p')
-				# 射频复位期间模组会回不带数值的 ^HCSQ: "NR"，此时剥掉制式后
-				# 是空串；不能只剥 "xx", 不然 "NR" 会被当成第一个数值，
-				# 后面 $(( "NR" - 140 )) 直接报 arithmetic syntax error。
 				vals=$(printf '%s' "$hcsq" | sed 's/^"[^"]*"//; s/^[[:space:]]*,//' | tr ',' ' ')
-				# shellcheck disable=SC2086
 				set -- $vals
 				case "$mode" in
 					LTE)   rsrp_idx=$2; sinr_idx=$3; rsrq_idx=$4 ;;
@@ -776,7 +601,6 @@ refresh_status() {
 		reg=$(at_run "$at" "AT+CEREG?" 4 | tr -d '\r' | sed -n 's/^+CEREG: *[0-9]*,\([0-9]*\).*/\1/p' | head -1)
 		sim=$(at_run "$at" "AT+CPIN?" 4 | tr -d '\r' | sed -n 's/^+CPIN: *//p' | head -1)
 
-		# 签约速率 + 载波聚合：只能问模组，未拨号/未注网时回 ERROR → 空
 		ambr=$(ambr_raw "$at")
 		cells=$(cells_raw "$at")
 	fi
@@ -811,7 +635,6 @@ refresh_status() {
 EOF
 	mv "$STATUS.tmp" "$STATUS"
 
-	# 信号灯：sig1..sig3
 	set_led hc:blue:sig1 $([ "$bars" -ge 1 ] && echo 1 || echo 0)
 	set_led hc:blue:sig2 $([ "$bars" -ge 2 ] && echo 1 || echo 0)
 	set_led hc:blue:sig3 $([ "$bars" -ge 3 ] && echo 1 || echo 0)
@@ -824,9 +647,6 @@ set_led() {
 	echo "$2" > "$d/brightness" 2>/dev/null
 }
 
-########################################
-# 子命令
-########################################
 cmd_status() {
 	[ -s "$STATUS" ] || refresh_status
 	cat "$STATUS"
@@ -835,9 +655,6 @@ cmd_status() {
 cmd_daemon() {
 	local n=0 reconciled=0 gpio_before gpio_want force=0
 
-	# 只允许一个实例。多实例会抢同一个 AT 口：at_run 的 flock 只能保证不串写，
-	# 抢不到锁的一方 read -t 1 超时，采回来就是空值（表现为「信号偶尔变空」）。
-	# 调试时用 start-stop-daemon 手动起过一个，就出现两三个 daemon 同时在跑。
 	if [ -s "$STATEDIR/daemon.pid" ]; then
 		local oldpid
 		oldpid=$(cat "$STATEDIR/daemon.pid" 2>/dev/null)
@@ -848,14 +665,10 @@ cmd_daemon() {
 	fi
 	echo $$ > "$STATEDIR/daemon.pid"
 
-	# 先把板级选卡开关拨到配置卡位（模组侧的 ^SCICHG 由模组自己保存）
 	gpio_want=$(sim_gpio_level "$(sim_slot_cfg)")
 	gpio_before=$(sim_get_gpio 2>/dev/null)
 	sim_set_gpio "$gpio_want"
 
-	# 需要立刻复位射频的两种情况：
-	#   1. 引脚电平刚被我们改过 —— 模组还按老电平认的卡，不复位不会重读；
-	#   2. 本次开机还没成功调平过（/tmp 是 tmpfs，重启就没了）。
 	if [ "$gpio_before" != "$gpio_want" ]; then
 		force=1
 		log "cpe-sel0 $gpio_before → $gpio_want，稍后复位射频重读卡"
@@ -864,20 +677,14 @@ cmd_daemon() {
 
 	while :; do
 		ensure_iface
-		# AT 口一就绪就对账一次，防止模组掉电/重启后丢了卡位
 		if [ "$reconciled" = "0" ]; then
 			sim_reconcile "$force" && reconciled=1
 		fi
-		# AT 采集比较慢，状态 30s 刷一次即可
-		# 自动轮询在动模组（复位射频/换卡）时别插一脚：refresh_status 要读 AT，
-		# 会和复位抢串口，还可能用旧卡的状态去拨号。
 		if sim_auto_running; then
 			refresh_status_light
 		elif [ $((n % 2)) -eq 0 ]; then
 			refresh_status
 			modem_dial
-			# 自动模式兜底：没网且冷却已过就自己找卡。放在 modem_dial 之后，
-			# 因为刚试过拨号，能拨起来就不该去动卡位。
 			sim_auto_maybe
 		else
 			refresh_status_light
@@ -887,14 +694,12 @@ cmd_daemon() {
 	done
 }
 
-# 只更新链路信息，不碰 AT 口（省时间）
 refresh_status_light() {
 	local netif ip4 tmp
 	netif=$(cat "$STATEDIR/iface" 2>/dev/null)
 	[ -n "$netif" ] || return 0
 	[ -s "$STATUS" ] || return 0
 	ip4=$(ip -4 -o addr show dev "$netif" 2>/dev/null | awk '{print $4}' | head -1)
-	# 不用 sed -i：它和 refresh_status 的 mv 撞在一起会偶发 "sed: write error"
 	tmp="$STATUS.light"
 	if sed "s|\"ipv4\": \"[^\"]*\"|\"ipv4\": \"${ip4:-}\"|" "$STATUS" > "$tmp" 2>/dev/null; then
 		mv "$tmp" "$STATUS"
@@ -909,20 +714,12 @@ cmd_reconnect() {
 	uci commit network
 	ifdown wwan 2>/dev/null
 	sleep 1
-	# 承载掉了先让模组重新拨一次，否则 eth2 无 carrier，DHCP 永远等不到
 	modem_dial >/dev/null 2>&1
 	ifup wwan 2>/dev/null
 	rm -f "$STATUS"
 	echo '{"ok":true}'
 }
 
-# 开机对账：把板级开关、模组选卡、SIM 就绪状态三件事一起对齐。
-# $1 = force，1 表示不管现状如何都重下一遍（含复位射频）。
-#
-# 为什么需要 force：模组是在上电那一刻把 SIM 认下来的，之后光拨 cpe-sel0 并不会
-# 让它重读卡（+CPIN? 依然是老的 READY，^SCICHG 也是老的值），只有复位射频才会。
-# 而 DTS 的 gpio-export,output = <1> 决定了每次上电 cpe-sel0 都是 1，所以只要
-# 配置的不是「电平 1」的卡位，开机必然要复位一次。
 sim_reconcile() {
 	local force="${1:-0}" at cfg want wgpio gpio cur pin
 
@@ -953,9 +750,6 @@ sim_reconcile() {
 	return 0
 }
 
-# 切完卡要复位模组的射频/SIM 部分，否则 +CPIN? 会报 +CME ERROR: 10。
-# 原厂 /etc/cpetools/generic.sh:command_generic_reset 用的是 CFUN=0 → CFUN=1（循环重试），
-# 不是 CFUN=1,1：这样 USB 不重新枚举、AT 口一直在，比整模组复位快也更不容易失败。
 sim_reset_radio() {
 	local at="$1" i=0 res
 
@@ -964,7 +758,6 @@ sim_reset_radio() {
 	while [ "$i" -lt 12 ]; do
 		sleep 2
 		if [ ! -c "$at" ]; then
-			# 万一模组重新枚举了，重新找一遍 AT 口
 			rm -f "$STATEDIR/at"
 			at=$(cached_at 2>/dev/null) || { i=$((i + 1)); continue; }
 		fi
@@ -978,9 +771,6 @@ sim_reset_radio() {
 	return 1
 }
 
-# 原厂在 SCICHG 前后还会发一对 AT^HVSST=1,0 / 1,1（见 huawei.sh 的 rstsim）。
-# 实测 MT5700 上这两条会回 CME ERROR，所以只做 best-effort，失败不影响主流程；
-# 但保留它们可以覆盖「内置卡走 HVSST 而不是 usim 通道」的可能。
 sim_hvsst() {
 	local at="$1"
 	[ -n "$at" ] || return 0
@@ -989,9 +779,6 @@ sim_hvsst() {
 	return 0
 }
 
-# 结果文件。前端轮询 siminfo 时把它带回页面。
-#   state: running（自动轮询进行中）/ ok / fail / revert / manual
-#   round/total：自动轮询进度；slot：正在试或已切到的卡位
 sim_result_write() {
 	local state="$1" msg="$2" iccid="${3:-}" round="${4:-0}" total="${5:-0}" slot="${6:-0}"
 	printf '{"state":"%s","msg":"%s","iccid":"%s","round":%s,"total":%s,"slot":%s,"ts":%s}\n' \
@@ -1004,13 +791,10 @@ sim_result_read() {
 	[ -s "$SIMRES" ] || return 1
 	ts=$(sed -n 's/.*"ts":\([0-9][0-9]*\).*/\1/p' "$SIMRES" 2>/dev/null)
 	[ -n "$ts" ] || return 1
-	# 自动轮询一轮可能跑好几分钟，结果保留 30 分钟，免得页面刚打开就看不到
 	[ $(( $(date +%s) - ts )) -lt 1800 ] || return 1
 	cat "$SIMRES"
 }
 
-# 只动硬件：cpe-sel0 → AT^SCICHG → AT^HVSST → 复位射频。
-# 不写 uci、不做自检 —— 手动切换和自动轮询都复用它。
 sim_apply_slot() {
 	local slot="$1" at gpio
 
@@ -1029,8 +813,6 @@ sim_apply_slot() {
 
 	at=$(cached_at 2>/dev/null)
 	if [ -n "$at" ]; then
-		# 顺序照抄原厂 command_huawei_usim_set 的 mt5700 分支：
-		#   AT^SCICHG=<usim-1>,<val2>  →  AT^HVSST 一对  →  复位射频
 		at_run "$at" "AT^SCICHG=$(sim_scichg "$slot")" 4 >/dev/null
 		sim_hvsst "$at"
 		sim_reset_radio "$at"
@@ -1041,7 +823,6 @@ sim_apply_slot() {
 	return 0
 }
 
-# 等 SIM 就绪。$1 = 最多等几秒。就绪回 READY，否则回显当时读到的 +CPIN 值。
 sim_wait_sim() {
 	local limit="${1:-80}" i=0 at pin=""
 
@@ -1059,8 +840,6 @@ sim_wait_sim() {
 	return 1
 }
 
-# 「这张卡能不能上网」：要有 IPv4 地址 + 默认路由 + ping 通公共 DNS。
-# 每张卡最多试 3 轮（约 15 s），够用又不至于把整轮拖太久。
 net_probe() {
 	local i=0 netif
 	netif=$(cat "$STATEDIR/iface" 2>/dev/null)
@@ -1079,7 +858,6 @@ net_probe() {
 	return 1
 }
 
-# 自动模式的切卡自检：不就绪/不通网 → 回滚到 prev（手动模式不走这里）
 sim_verify() {
 	local prev="$1" want="$2" pin iccid at
 
@@ -1101,7 +879,6 @@ sim_verify() {
 	at=$(cached_at 2>/dev/null)
 	[ -n "$at" ] && iccid=$(at_run "$at" "AT^ICCID?" 4 | tr -d '\r' \
 		| sed -n 's/.*\^ICCID: *//p' | head -1)
-	# 复位射频会把承载打掉，补拨一次让新卡尽快通网
 	modem_dial "$at" 3
 	rm -f "$STATUS" "$STATEDIR/at"
 	sim_result_write ok "卡位 $want · $(sim_slot_name "$want") 已就绪" "${iccid:-}" 0 0 "$want"
@@ -1150,7 +927,6 @@ cmd_siminfo() {
 		"$(json_esc "${SIM_SRC:-内置默认}")" "$res" "$(sim_cards_json)"
 }
 
-# 手动切换（页面点某张卡）：$1=卡位 $2=模式（省略则按当前配置）
 cmd_simswitch() {
 	local slot="$1" mode="${2:-}" prev
 
@@ -1164,7 +940,6 @@ cmd_simswitch() {
 
 	[ -n "$mode" ] || mode=$(sim_mode_cfg)
 
-	# 自动轮询在跑的时候不要插队：两个 worker 同时改 cpe-sel0/^SCICHG 会互相打架
 	if sim_auto_running; then
 		echo '{"ok":false,"msg":"自动轮询正在进行，请先点「停止」或等它结束"}'
 		return 1
@@ -1173,9 +948,6 @@ cmd_simswitch() {
 	prev=$(sim_slot_cfg)
 	[ "$prev" = "$slot" ] && { echo "{\"ok\":true,\"slot\":$slot,\"same\":true}"; return 0; }
 
-	# 立刻返回：整个切换要「改 GPIO → AT^SCICHG → 射频复位」，实测 40~90 秒，
-	# 远超 ubus 调用超时，同步做完前端只会拿到 null。真正的活儿丢后台 worker，
-	# 前端靠轮询 siminfo 拿结果。
 	if command -v start-stop-daemon >/dev/null 2>&1; then
 		start-stop-daemon -S -b -x /usr/sbin/c2000-modem -- simdo "$prev" "$slot" "$mode" \
 			>/dev/null 2>&1
@@ -1186,9 +958,6 @@ cmd_simswitch() {
 	echo "{\"ok\":true,\"slot\":$slot,\"prev\":$prev,\"mode\":\"$mode\",\"pending\":true}"
 }
 
-# 后台切卡 worker：$1=原卡位 $2=目标卡位 $3=auto|manual
-#   manual —— 只等 SIM 就绪并报告，**不就绪也不回滚**（用户明确要求）
-#   auto   —— 走 sim_verify，不就绪回滚到原卡位
 cmd_simdo() {
 	local prev="$1" slot="$2" mode="${3:-manual}" pin at iccid
 
@@ -1224,14 +993,6 @@ cmd_simdo() {
 	return 0
 }
 
-########################################
-# 自动轮询
-########################################
-# 策略：
-#   · 从卡位 1 开始逐个试，一张卡能上网就停在它上面
-#   · 所有卡各试一遍算一轮，最多 rounds 轮（默认 3）
-#   · 一轮全失败 → 回到开始轮询前的卡位
-#   · 手动模式绝不会走到这里
 cmd_simauto() {
 	local prev rounds max r s pin hit=0 at
 
@@ -1269,8 +1030,6 @@ cmd_simauto() {
 
 			sim_apply_slot "$s" || { sleep 3; continue; }
 
-			# 空卡槽会一直等到超时，轮询里没必要等满 80 s（开机实测：射频复位后
-			# 有卡的卡位十几秒就 READY，空卡槽永远等不到）→ 收紧到 60 s
 			pin=$(sim_wait_sim 60)
 			if [ "$pin" = "READY" ]; then
 				at=$(cached_at 2>/dev/null)
@@ -1299,9 +1058,6 @@ cmd_simauto() {
 		sim_apply_slot "$prev"
 		uci set c2000-modem.sim.slot="$prev"
 		uci commit c2000-modem
-		# 【2026-11-16】回滚必须**把网也拉回来**。之前只切硬件不拨号，
-		# 结果「已回到卡位 1」但承载是断的 → 整个设备离线（实测踩到）。
-		# 尽力而为：SIM 就绪就试拨 3 次，失败也不改回滚结论。
 		if [ "$(sim_wait_sim 60)" = "READY" ]; then
 			modem_dial "$(cached_at 2>/dev/null)" 3
 		fi
@@ -1315,7 +1071,6 @@ cmd_simauto() {
 	return 0
 }
 
-# 自动轮询是否正在跑
 sim_auto_running() {
 	local p
 	[ -f "$STATEDIR/simauto.pid" ] || return 1
@@ -1323,14 +1078,11 @@ sim_auto_running() {
 	[ -n "$p" ] && kill -0 "$p" 2>/dev/null
 }
 
-# 停止：只放停止标记，让 worker 在「当前这张卡」处理完自己退出。
-# **不要 kill** —— 卡在半路（CFUN=0 或射频复位中）会把模组留在没网状态。
 cmd_simstop() {
 	: > "$STATEDIR/simauto.stop"
 	echo '{"ok":true,"stopping":true}'
 }
 
-# 设置模式：0=自动 1=手动
 cmd_simsetmode() {
 	case "${1:-}" in
 	0|1) ;;
@@ -1341,17 +1093,12 @@ cmd_simsetmode() {
 	echo "{\"ok\":true,\"mode\":$1}"
 }
 
-# 守护进程每轮调用一次：**自动模式 + 当前上不了网 + 冷却已过 + 没有在跑** → 起一轮。
-# 这就是「刷入首启会自动跑一次，之后有网就不动」的实现方式：
-# 首启没有网 → 条件成立；跑成功后网通了 → net_probe 直接 return，不会反复折腾。
 sim_auto_maybe() {
 	[ "$(sim_mode_cfg)" = "0" ] || return 0
 
 	sim_auto_running && return 0
 	rm -f "$STATEDIR/simauto.pid"
 
-	# 开机 2 分钟内不折腾：那时 sim_reconcile 刚把配置卡位调平、DHCP 还在协商，
-	# 这时候判「没网」是假阴性，会把好好的卡切走。
 	local up
 	up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
 	case "$up" in ''|*[!0-9]*) up=0 ;; esac
@@ -1395,8 +1142,6 @@ cmd_switch() {
 	esac
 }
 
-# C2000_LIB_ONLY=1 时只加载函数、不执行子命令（单元测试 / 排障时 source 用）。
-# 故意用 if 包住而不是 return：dash 下 source 里的顶层 return 会把整个脚本结束掉。
 if [ -z "${C2000_LIB_ONLY:-}" ]; then
 case "$1" in
 	status)    cmd_status ;;

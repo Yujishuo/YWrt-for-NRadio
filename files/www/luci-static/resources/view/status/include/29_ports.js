@@ -466,14 +466,6 @@ return baseclass.extend({
 			return L.naturalCompare(a.device, b.device);
 		});
 
-		/*
-		 * 布局修正（YWrt）：
-		 * 官方版把盒子放进 display:grid + repeat(auto-fit, minmax(70px, 1fr))，
-		 * 而盒子自身又限了 max-width:100px。端口少时 auto-fit 会把每列拉满容器，
-		 * 于是两个 100px 的小方块被顶到两端、中间留出大片空白；grid 默认
-		 * align-items:stretch 还会把盒子高度也撑开。
-		 * 这里改成 flex 靠左排布 + 固定宽度，间距统一，盒子高度随内容。
-		 */
 		return E('div', {
 			'style': 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:1em;align-items:flex-start'
 		}, known_ports.map(function(port) {
@@ -522,7 +514,7 @@ return baseclass.extend({
 					E('span', { 'style': 'font-size:90%;font-weight:600' },
 						[ formatSpeed(carrier, speed, duplex) ])
 				]),
-				/* 区域色条：原来塞在 .ifacebox-head 里，会带出灰底和上边框，这里单独清掉 */
+
 				E('div', {
 					'class': 'ifacebox-head cbi-tooltip-container',
 					'style': 'display:flex;padding:0;border-bottom:none;background:transparent;min-height:3px'

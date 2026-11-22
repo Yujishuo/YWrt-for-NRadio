@@ -1,5 +1,4 @@
 #!/bin/sh
-# rpcd 后端：给 LuCI（luci-app-c2000-modem）用的 ubus 对象 "c2000-modem"
 . /usr/share/libubox/jshn.sh
 
 S=/usr/sbin/c2000-modem
@@ -76,7 +75,6 @@ call)
 		json_get_var action action
 		case "$action" in
 		start)
-			# 立刻返回，轮询在后台跑；前端靠 siminfo 的 result/autorun 看进度
 			$S simauto >/dev/null 2>&1 &
 			printf '{"ok":true,"started":true}\n'
 			;;

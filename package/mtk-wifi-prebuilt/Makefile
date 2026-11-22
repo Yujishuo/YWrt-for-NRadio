@@ -18,7 +18,6 @@ define Build/Compile
 	true
 endef
 
-# ---------------------------------------------------------------- mt_wifi7
 define KernelPackage/mt_wifi7
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -39,7 +38,6 @@ define KernelPackage/mt_wifi7/install
 	$(INSTALL_BIN) $(KO)/mt_wifi.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- mt_hwifi
 define KernelPackage/mt_hwifi
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -58,7 +56,6 @@ define KernelPackage/mt_hwifi/install
 	$(INSTALL_BIN) $(KO)/mtk_hwifi.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- mt7992
 define KernelPackage/mt7992
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -73,7 +70,6 @@ define KernelPackage/mt7992/install
 	$(INSTALL_BIN) $(KO)/mt7992.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- mtk_pci
 define KernelPackage/mtk_pci
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -88,7 +84,6 @@ define KernelPackage/mtk_pci/install
 	$(INSTALL_BIN) $(KO)/mtk_pci.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- mtk_wed
 define KernelPackage/mtk_wed
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -103,7 +98,6 @@ define KernelPackage/mtk_wed/install
 	$(INSTALL_BIN) $(KO)/mtk_wed.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- connac_if
 define KernelPackage/connac_if
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -118,7 +112,6 @@ define KernelPackage/connac_if/install
 	$(INSTALL_BIN) $(KO)/connac_if.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- warp
 define KernelPackage/warp
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers
@@ -134,7 +127,6 @@ define KernelPackage/warp/install
 	$(INSTALL_BIN) $(KO)/mtk_warp.ko $(1)/$(MODULES_SUBDIR)/
 endef
 
-# ---------------------------------------------------------------- osal
 define KernelPackage/mt_wifi_osal
   CATEGORY:=MTK Properties
   SUBMENU:=Drivers

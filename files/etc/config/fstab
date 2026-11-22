@@ -1,11 +1,3 @@
-# C2000 Ultra：原厂 SD p1 只读挂载
-#
-# 为什么镜像必须自带这个文件：/etc/config/fstab 不在 OpenWrt 镜像里，首启由
-# 10-fstab 这个 uci-defaults 生成，而它只写 anon_* 那些全局项、不会挂 p1。
-# 但 c2000-modem 要从 /mnt/mmcblk0p1/upper/etc/config/cpesel 读卡表，
-# 读不到就退化成内置兜底（内容其实一致，但失去了跟原厂配置同步的能力）。
-#
-# 只读、不写、ignore_uuid（p1 是 f2fs 出厂分区，UUID 不当唯一标识用）。
 
 config global
 	option anon_swap '0'

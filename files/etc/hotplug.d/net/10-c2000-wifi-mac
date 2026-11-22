@@ -1,48 +1,4 @@
 #!/bin/sh
-# NRadio C2000 Ultra（nradio,wt9500）—— 修 2.4G 入不了网桥
-#
-# 【现象】2.4G（ra0）能被客户端连上，但拿不到 IP。
-# 【根因】出厂 Factory 分区（mtd2）偏移 4 处给 BN0 的 MAC 是
-#         0f:00:43:26:60:a8 —— 第一字节 0x0f 的最低比特为 1，是【组播】地址。
-#         内核 net/bridge/br_if.c:br_add_if() 里有
-#             if (!is_valid_ether_addr(dev->dev_addr)) → -EINVAL
-#         所以 netifd 挂桥一定失败，手工执行也一样：
-#             ip link set ra0 master br-lan
-#             → RTNETLINK answers: Invalid argument
-#         对照：5G 的 rai0 从 Factory 分区偏移 10 处读到 00:0c:43:26:60:11，
-#         是合法单播，所以 5G 一直在 br-lan 里、一直正常。
-#
-# 【为什么不在别处修】
-#   · /lib/firmware/e2p 与 NOR mtd2 前 1 MB 逐字节一致，且 E2pAccessMode=2
-#     是 FLASH 模式 —— 那串组播 MAC 属于出厂数据本身，改它等于动 NOR（红线）。
-#   · 试过 uci 的 wireless.<iface>.macaddr：它只被写进 profile 的
-#     MacAddress= 字段、最终变成 hostapd 的 bssid=，netdev 的地址不变，
-#     于是 hostapd 直接报
-#         Configured BSSID ... does not match ra0 MAC address ...
-#     并把 ra0 拉下去（比原来更糟），已撤。
-#   · 试过写 /sys/class/ieee80211/phy0/macaddress（OpenWrt 自带
-#     11_fix_wifi_mac 用的就是它）：值确实写进去了，但闭源 mt_wifi 驱动
-#     不认这个属性，netdev 地址仍取自 EEPROM。
-#
-# 【本脚本的做法】在 ra0 这个 netdev 出现时（hotplug net / ACTION=add）
-#   把它的地址改成合法单播。地址来源与板级保持一致：bdinfo（mtd3）里的
-#       fac_mac = FC:83:C6:18:80:32
-#   eth0 正好等于 fac_mac、eth1 等于 fac_mac+1，故 2.4G 取 fac_mac+2
-#   = fc:83:c6:18:80:34，与 eth0/eth1 不冲突。
-#   改完 netifd 再挂桥就能成功（实测 state forwarding）。
-#
-# 注意：bdinfo 里是文本 "fac_mac = FC:83:C6:18:80:32"，但 strings 会把紧挨着
-#   的二进制字节 0x32 一起带进来，变成 "2fac_mac = ..."，所以不能用
-#   mtd_get_mac_ascii（它按 ^fac_mac= 锚定，取不到值），这里用宽松匹配。
-
-# 注意 5G（rai0）也在这里一起改：它原来用的是 Factory 分区偏移 10 处的
-# 00:0c:43:26:60:11，那串和 2.4G 那段（0f:00:43:26:60:a8）中间都夹着
-# 「43:26:60」，一眼就是模板数据而非逐台烧写的 MAC；原厂实际用的是
-# fac_mac 系列（dmesg: BN(1) MAC: =fc:83:c6:18:80:33）。若多台同型号设备的
-# Factory 分区模板相同，局域网里会撞 MAC。所以两个频段统一从 fac_mac 派生：
-#   2.4G = fac_mac + 2 = fc:83:c6:18:80:34
-#   5G   = fac_mac + 3 = fc:83:c6:18:80:35
-# （eth0 = fac_mac、eth1 = fac_mac+1，均不冲突）
 
 [ "$ACTION" = "add" ] || exit 0
 

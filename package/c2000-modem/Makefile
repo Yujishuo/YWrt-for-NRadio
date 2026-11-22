@@ -1,14 +1,3 @@
-#
-# c2000-modem —— NRadio C2000 Ultra 的 5G 模组（TDTECH MT5700M-CN）支持
-#
-# 这个包负责：
-#   * 认出 USB 侧冒出来的 NCM/RNDIS 网卡，自动建/复位 wwan 接口（DHCP 拨号）
-#   * 探测 AT 口，采集信号/注网/温度，写 /tmp/c2000-modem/status.json
-#   * 按信号强度点亮面板上的 sig1/sig2/sig3 三颗指示灯
-#   * 通过 rpcd 暴露给 LuCI（luci-app-c2000-modem）
-#   * 附带 fw_env.config，让 uboot-envtools 能改 NOR 里的 u-boot 环境
-#     （切换 SD 双系统就靠它）
-#
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000-modem

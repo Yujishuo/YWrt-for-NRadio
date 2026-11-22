@@ -1,5 +1,4 @@
 #!/bin/sh /etc/rc.common
-# c2000-modem 守护进程：维护 wwan 接口、刷新状态、驱动信号灯
 START=95
 STOP=10
 USE_PROCD=1

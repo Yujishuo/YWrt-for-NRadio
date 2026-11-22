@@ -1,13 +1,4 @@
 #!/bin/bash
-# Build the firmware from this tree.
-#
-#   ./scripts/feeds update -a && ./scripts/feeds install -a
-#   cp defconfig/c2000-ultra.config .config
-#   make menuconfig          # optional: pick target / device / packages
-#   ./build.sh
-#
-# Two passes are intentional: the first builds everything, the second
-# refreshes the rootfs so that files/ and package changes land in the image.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -26,11 +17,6 @@ if [ ! -s private-key.pem ] || [ ! -s public-key.pem ]; then
 	echo "created apk signing keys"
 fi
 
-# base-files is packaged as "$(PKG_RELEASE)~$(lastword $(subst -, ,$(REVISION)))"
-# and apk rejects a version whose last segment is not numeric.  getver.sh falls
-# back to "unknown" when there is neither a version file nor a .git directory,
-# which turns the version into "<n>~unknown" and kills the build late.  Catch it
-# now instead of 50 minutes in.
 REV="$(./scripts/getver.sh)"
 case "${REV##*-}" in
 [0-9]*) ;;

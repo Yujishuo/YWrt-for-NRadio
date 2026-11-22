@@ -1,5 +1,4 @@
 #!/bin/sh
-# 5G 模组（USB 网卡）插拔时，通知 c2000-modem 重新识别 wwan 接口
 [ -n "$INTERFACE" ] || exit 0
 [ -d "/sys/class/net/$INTERFACE/device" ] || exit 0
 [ -x /usr/sbin/c2000-modem ] || exit 0

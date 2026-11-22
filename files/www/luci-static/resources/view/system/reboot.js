@@ -4,18 +4,6 @@
 'require ui';
 'require uci';
 
-/*
- * 系统 → 重启
- *
- * 这是 LuCI 自带 view/system/reboot.js 的替换版，只多做两件事：
- *   1. 显示当前跑的是哪个系统、下次会从哪个系统启动
- *   2. 提供「切到 YWrt（SD）/ 切到原厂系统（NOR）」按钮
- *
- * 原版行为（重载 uci 未保存变更、perform reboot）完全保留，未做任何改动。
- *
- * 切换只写 u-boot 环境变量 boot_system / boot_from_sd，不动任何分区内容。
- */
-
 var callReboot = rpc.declare({
 	object: 'system',
 	method: 'reboot',
@@ -95,8 +83,6 @@ return view.extend({
 			'class': 'cbi-button cbi-button-action important',
 			'click': ui.createHandlerFn(this, 'handleReboot')
 		}, _('Perform reboot')));
-
-		/* ---------------- 启动系统切换 ---------------- */
 
 		body.appendChild(E('hr'));
 		body.appendChild(E('h2', {}, _('启动系统切换')));
