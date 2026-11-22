@@ -71,24 +71,33 @@ jobs:
 
       - name: Preflight the config
         run: |
+          set +e
           BASE="${{ steps.space.outputs.base }}"
           cd "$BASE/src"
           CFG="${{ inputs.defconfig }}"
           [ -n "$CFG" ] || CFG=defconfig/c2000-ultra.config
           cp "$CFG" .config
-          set +e
-          make defconfig > "$BASE/defconfig.log" 2>&1
-          echo "defconfig rc=$?"
-          set -e
-          echo "--- recursive dependency ---"
-          grep -nE 'recursive dependency' "$BASE/defconfig.log" || echo "(none)"
-          echo "--- feed/packaging switches ---"
-          grep -E '^CONFIG_(USE_APK|SIGNED_PACKAGES|BUILDBOT|IB|ALL|PER_PACKAGE_DIRS)=' .config || true
-          echo "--- counts ---"
-          echo "y: $(grep -c '=y$' .config)  total: $(wc -l < .config)"
-          echo "--- target ---"
-          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET)=' .config || true
-          sed -n 's/^CONFIG_TARGET_DEVICE_[^=]*_DEVICE_\(.*\)=y$/  device: \1/p' .config
+          {
+            echo "## defconfig run"
+            make defconfig
+            echo "defconfig rc=$?"
+            echo
+            echo "## switches"
+            grep -E '^CONFIG_(USE_APK|SIGNED_PACKAGES|BUILDBOT|IB|ALL|PER_PACKAGE_DIRS|AUTOREMOVE|CCACHE|CLEAN_IPKG)=' .config
+            echo "y-count: $(grep -c '=y$' .config)  total: $(wc -l < .config)"
+            echo
+            echo "## target"
+            grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES)=' .config
+            sed -n 's/^CONFIG_TARGET_DEVICE_[^=]*_DEVICE_\(.*\)=y$/  device: \1/p' .config
+            echo
+            echo "## git metadata in the build tree"
+            ls -d .git 2>&1
+            echo
+            echo "## keys"
+            ls -l private-key.pem public-key.pem 2>&1
+          } > "$BASE/preflight.log" 2>&1
+          cat "$BASE/preflight.log"
+          exit 0
 
       - name: Build
         run: |
@@ -105,47 +114,70 @@ jobs:
       - name: Diagnose the failing package
         if: failure()
         run: |
+          set +e
           BASE="${{ steps.space.outputs.base }}"
-          cd "$BASE/src"
+          cd "$BASE/src" || exit 0
           {
             echo "## environment"
-            echo "keys:";        ls -l private-key.pem public-key.pem 2>&1
-            echo "host tools:";  ls -l staging_dir/host/bin/apk staging_dir/host/bin/fakeroot 2>&1
-            echo "devices:";     df -h .
+            echo "-- keys --"
+            ls -l private-key.pem public-key.pem
+            echo "-- host tools --"
+            ls -l staging_dir/host/bin/apk staging_dir/host/bin/fakeroot staging_dir/host/bin/usign staging_dir/host/bin/ucert
+            echo "-- disk --"
+            df -h .
+            echo "-- staging dirs --"
+            ls -d staging_dir/target-* build_dir/target-* 2>&1
+            echo "-- base-files apk --"
+            ls -l bin/packages/*/base/base-files* 2>&1
+            echo "-- base-files stamps --"
+            ls -l staging_dir/target-*/stamp/ 2>&1 | grep -i base-files
+            echo "-- base-files build dir --"
+            ls -l build_dir/target-*/base-files/ 2>&1
+            echo "-- root dirs --"
+            ls -ld staging_dir/target-*/root-* 2>&1
             echo
-            echo "## before retry"
-            echo "pkgdir:";      ls -l build_dir/target-*/base-files/ 2>&1 | head -20
-            echo "pkgdir base-files:"; ls -l build_dir/target-*/base-files/.pkgdir/base-files/ 2>&1 | head -20
-            echo "packages:";    ls -l bin/packages/*/base/ 2>&1 | head -20
-            echo "stamps:";      ls -l staging_dir/target-*/stamp/ 2>&1 | grep -i base-files
+            echo "## retry 1: prepare V=sc"
+            make -C package/base-files prepare V=sc
+            echo "prepare rc=$?"
             echo
-            echo "## verbose retry (pkgdir and .apk are wiped first)"
-            rm -rf build_dir/target-*/base-files/.pkgdir
-            rm -f  bin/packages/*/base/base-files*.apk
-            make -C package/base-files compile V=s 2>&1
-            echo "retry rc=$?"
+            echo "## retry 2: compile V=sc"
+            make -C package/base-files compile V=sc
+            echo "compile rc=$?"
+            echo
+            echo "## retry 3: top level package/base-files/compile V=sc"
+            make package/base-files/compile V=sc
+            echo "toplevel rc=$?"
+            echo
+            echo "## after retry"
+            ls -l bin/packages/*/base/base-files* 2>&1
+            ls -l staging_dir/target-*/stamp/ 2>&1 | grep -i base-files
+            ls -l build_dir/target-*/base-files/ 2>&1 | head -20
           } > "$BASE/diag.log" 2>&1
-          tail -n 120 "$BASE/diag.log"
+          tail -n 150 "$BASE/diag.log"
+          exit 0
 
       - name: Summary
         if: always()
         run: |
+          set +e
           BASE="${{ steps.space.outputs.base }}"
           {
             echo "## result"
-            for f in defconfig.log build.log diag.log; do
+            for f in preflight.log build.log diag.log; do
               if [ -f "$BASE/$f" ]; then
-                echo "### $f (last 40 lines)"
+                echo "### $f (last 60 lines)"
                 echo '```'
-                tail -n 40 "$BASE/$f"
+                tail -n 60 "$BASE/$f"
                 echo '```'
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Publish log on failure
         if: failure()
         run: |
+          set +e
           BASE="${{ steps.space.outputs.base }}"
           mkdir -p "$RUNNER_TEMP/ci-log" && cd "$RUNNER_TEMP/ci-log"
           git init -q -b ci-log
@@ -156,31 +188,33 @@ jobs:
             echo "sha: $GITHUB_SHA"
             echo
             echo "## error-like lines"
-            grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file|failed to build" \
-              "$BASE/build.log" 2>/dev/null | tail -n 200 || echo "(none)"
+            grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file|failed to build|cannot" \
+              "$BASE/build.log" 2>/dev/null | tail -n 200
             echo
             echo "## context before the first failure"
             L=$(grep -n "ERROR: .* failed to build" "$BASE/build.log" 2>/dev/null | head -1 | cut -d: -f1)
             if [ -n "${L:-}" ]; then
-              s=$(( L > 150 ? L - 150 : 1 ))
+              s=$(( L > 200 ? L - 200 : 1 ))
               sed -n "${s},$(( L + 20 ))p" "$BASE/build.log"
             else
               echo "(no 'failed to build' line)"
             fi
             echo
-            echo "## diagnose"
-            cat "$BASE/diag.log" 2>/dev/null || echo "(no diag.log)"
+            echo "## preflight"
+            cat "$BASE/preflight.log" 2>/dev/null
             echo
-            echo "## defconfig"
-            cat "$BASE/defconfig.log" 2>/dev/null || echo "(no defconfig.log)"
+            echo "## diagnose (verbose retry)"
+            cat "$BASE/diag.log" 2>/dev/null
             echo
             echo "## full build.log"
-            echo "lines: $(wc -l < "$BASE/build.log" 2>/dev/null || echo 0)"
-            cat "$BASE/build.log" 2>/dev/null || echo "(no build.log)"
-          } > ci-log.txt
+            echo "lines: $(wc -l < "$BASE/build.log" 2>/dev/null)"
+            cat "$BASE/build.log" 2>/dev/null
+          } > ci-log.txt 2>&1
+          wc -l ci-log.txt
           git add ci-log.txt
           git commit -q -m "ci log $GITHUB_RUN_ID"
           git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ci-log
+          exit 0
 
       - name: Upload artifacts
         if: always()
@@ -191,7 +225,7 @@ jobs:
             ${{ steps.space.outputs.base }}/src/bin/targets/**/*.tar
             ${{ steps.space.outputs.base }}/build.log
             ${{ steps.space.outputs.base }}/diag.log
-            ${{ steps.space.outputs.base }}/defconfig.log
+            ${{ steps.space.outputs.base }}/preflight.log
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
