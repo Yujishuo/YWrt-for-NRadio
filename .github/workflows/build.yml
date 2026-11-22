@@ -104,6 +104,28 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish log on failure
+        if: failure()
+        run: |
+          BASE="${{ steps.space.outputs.base }}"
+          BASE="${BASE:-/mnt/ywrt}"
+          mkdir -p "$RUNNER_TEMP/ci-log" && cd "$RUNNER_TEMP/ci-log"
+          git init -q -b ci-log
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          {
+            echo "# failed run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo
+            echo "## errors"
+            grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file|failed to build" "$BASE/build.log" 2>/dev/null | tail -n 150 || true
+            echo
+            echo "## tail 800"
+            tail -n 800 "$BASE/build.log" 2>/dev/null || echo "(no build.log)"
+          } > ci-log.txt
+          git add ci-log.txt
+          git commit -q -m "ci log $GITHUB_RUN_ID"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ci-log
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
