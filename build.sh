@@ -26,6 +26,24 @@ if [ ! -s private-key.pem ] || [ ! -s public-key.pem ]; then
 	echo "created apk signing keys"
 fi
 
+# base-files is packaged as "$(PKG_RELEASE)~$(lastword $(subst -, ,$(REVISION)))"
+# and apk rejects a version whose last segment is not numeric.  getver.sh falls
+# back to "unknown" when there is neither a version file nor a .git directory,
+# which turns the version into "<n>~unknown" and kills the build late.  Catch it
+# now instead of 50 minutes in.
+REV="$(./scripts/getver.sh)"
+case "${REV##*-}" in
+[0-9]*) ;;
+*)
+	echo "!! scripts/getver.sh returned '$REV'." >&2
+	echo "   base-files would be packaged as version '<release>~${REV##*-}'," >&2
+	echo "   which apk rejects, so the image cannot be built." >&2
+	echo "   Fix: keep the .git directory, or ship a 'version' file at the top" >&2
+	echo "   of the tree containing a string like r0-69fe2f9." >&2
+	exit 1
+	;;
+esac
+
 cfg() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" .config 2>/dev/null | head -1; }
 
 [ -d package/feeds ] || echo "!! package/feeds is missing - run ./scripts/feeds update -a && ./scripts/feeds install -a" >&2
@@ -42,6 +60,7 @@ echo
 echo "  board     : $BOARD"
 echo "  subtarget : $SUBTARGET"
 echo "  devices   : ${DEVICES:-<none>}"
+echo "  revision  : $REV"
 echo "  jobs      : $(nproc)"
 
 echo

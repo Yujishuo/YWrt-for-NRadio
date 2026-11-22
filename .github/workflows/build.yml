@@ -22,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Free disk space
         run: |
@@ -59,8 +61,10 @@ jobs:
           fi
           sudo mkdir -p "$best/ywrt"
           sudo chown "$(id -u):$(id -g)" "$best/ywrt"
-          rsync -a --exclude=.git ./ "$best/ywrt/src/"
+          rsync -a ./ "$best/ywrt/src/"
           echo "base=$best/ywrt" >> "$GITHUB_OUTPUT"
+          echo "--- tree revision seen by getver.sh ---"
+          ( cd "$best/ywrt/src" && ./scripts/getver.sh )
           ls "$best/ywrt/src" | head
 
       - name: Feeds
