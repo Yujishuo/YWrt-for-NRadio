@@ -1,7 +1,8 @@
 {#
  Vantage theme - footer.
- Versions are shortened to what a person reads: "OpenWrt 25.12.3 · LuCI 26.124"
- (no git describe noise such as "(HEAD detached at …) branch" or "~hash"),
+ Shows the release identity a person reads: "YWrt 1.0.0 / openwrt-25.12".
+ The right side is the LuCI branch verbatim (never its ~hash revision), so the
+ footer tracks the feed branch without any build noise.
  entity-encoded, and only shown to logged-in users: error pages reach
  anonymous visitors too. The menu script is only loaded for a session.
  (The core header's L.env script still carries the LuCI build for
@@ -13,14 +14,12 @@
 		</main>
 {%
 	const dist_ver = match(version.distversion ?? '', /^[0-9A-Za-z][0-9A-Za-z.+-]*/);
-	const luci_name = match(version.luciname ?? '', /^[A-Za-z][A-Za-z0-9]*/);
-	const luci_ver = match(version.luciversion ?? '', /[0-9]+\.[0-9]+/);
 -%}
 		<footer class="vt-foot">
 {% if (ctx.authsession): %}
 			<span>{{ entityencode(version.distname ?? 'OpenWrt', true) }}{{ dist_ver ? ' ' + entityencode(dist_ver[0], true) : '' }}</span>
-			<span class="vt-foot-sep" aria-hidden="true">·</span>
-			<span>{{ entityencode(luci_name ? luci_name[0] : 'LuCI', true) }}{{ luci_ver ? ' ' + entityencode(luci_ver[0], true) : '' }}</span>
+			<span class="vt-foot-sep" aria-hidden="true">/</span>
+			<span>{{ entityencode(version.luciname ?? 'openwrt-25.12', true) }}</span>
 {% endif %}
 		</footer>
 	</div>
