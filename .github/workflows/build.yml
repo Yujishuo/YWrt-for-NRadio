@@ -69,7 +69,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build
+      - name: Preflight the config
         run: |
           BASE="${{ steps.space.outputs.base }}"
           cd "$BASE/src"
@@ -77,50 +77,106 @@ jobs:
           [ -n "$CFG" ] || CFG=defconfig/c2000-ultra.config
           cp "$CFG" .config
           set +e
-          ./build.sh 2>&1 | tee "$BASE/build.log"
-          rc=${PIPESTATUS[0]}
+          make defconfig > "$BASE/defconfig.log" 2>&1
+          echo "defconfig rc=$?"
+          set -e
+          echo "--- recursive dependency ---"
+          grep -nE 'recursive dependency' "$BASE/defconfig.log" || echo "(none)"
+          echo "--- feed/packaging switches ---"
+          grep -E '^CONFIG_(USE_APK|SIGNED_PACKAGES|BUILDBOT|IB|ALL|PER_PACKAGE_DIRS)=' .config || true
+          echo "--- counts ---"
+          echo "y: $(grep -c '=y$' .config)  total: $(wc -l < .config)"
+          echo "--- target ---"
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET)=' .config || true
+          sed -n 's/^CONFIG_TARGET_DEVICE_[^=]*_DEVICE_\(.*\)=y$/  device: \1/p' .config
+
+      - name: Build
+        run: |
+          BASE="${{ steps.space.outputs.base }}"
+          cd "$BASE/src"
+          set +e
+          ./build.sh > "$BASE/build.log" 2>&1
+          rc=$?
           set -e
           echo "build rc=$rc"
+          tail -n 30 "$BASE/build.log"
           exit $rc
+
+      - name: Diagnose the failing package
+        if: failure()
+        run: |
+          BASE="${{ steps.space.outputs.base }}"
+          cd "$BASE/src"
+          {
+            echo "## environment"
+            echo "keys:";        ls -l private-key.pem public-key.pem 2>&1
+            echo "host tools:";  ls -l staging_dir/host/bin/apk staging_dir/host/bin/fakeroot 2>&1
+            echo "devices:";     df -h .
+            echo
+            echo "## before retry"
+            echo "pkgdir:";      ls -l build_dir/target-*/base-files/ 2>&1 | head -20
+            echo "pkgdir base-files:"; ls -l build_dir/target-*/base-files/.pkgdir/base-files/ 2>&1 | head -20
+            echo "packages:";    ls -l bin/packages/*/base/ 2>&1 | head -20
+            echo "stamps:";      ls -l staging_dir/target-*/stamp/ 2>&1 | grep -i base-files
+            echo
+            echo "## verbose retry (pkgdir and .apk are wiped first)"
+            rm -rf build_dir/target-*/base-files/.pkgdir
+            rm -f  bin/packages/*/base/base-files*.apk
+            make -C package/base-files compile V=s 2>&1
+            echo "retry rc=$?"
+          } > "$BASE/diag.log" 2>&1
+          tail -n 120 "$BASE/diag.log"
 
       - name: Summary
         if: always()
         run: |
           BASE="${{ steps.space.outputs.base }}"
-          BASE="${BASE:-/mnt/ywrt}"
           {
             echo "## result"
-            if [ -f "$BASE/build.log" ]; then
-              echo '### errors'
-              echo '```'
-              grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file" "$BASE/build.log" | tail -n 60 || echo "(none)"
-              echo '```'
-              echo '### tail'
-              echo '```'
-              tail -n 120 "$BASE/build.log"
-              echo '```'
-            else
-              echo "build did not start"
-            fi
+            for f in defconfig.log build.log diag.log; do
+              if [ -f "$BASE/$f" ]; then
+                echo "### $f (last 40 lines)"
+                echo '```'
+                tail -n 40 "$BASE/$f"
+                echo '```'
+              fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish log on failure
         if: failure()
         run: |
           BASE="${{ steps.space.outputs.base }}"
-          BASE="${BASE:-/mnt/ywrt}"
           mkdir -p "$RUNNER_TEMP/ci-log" && cd "$RUNNER_TEMP/ci-log"
           git init -q -b ci-log
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           {
             echo "# failed run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "sha: $GITHUB_SHA"
             echo
-            echo "## errors"
-            grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file|failed to build" "$BASE/build.log" 2>/dev/null | tail -n 150 || true
+            echo "## error-like lines"
+            grep -nE "Error [0-9]|ERROR:|No space left|error:|Hash mismatch|No such file|failed to build" \
+              "$BASE/build.log" 2>/dev/null | tail -n 200 || echo "(none)"
             echo
-            echo "## tail 800"
-            tail -n 800 "$BASE/build.log" 2>/dev/null || echo "(no build.log)"
+            echo "## context before the first failure"
+            L=$(grep -n "ERROR: .* failed to build" "$BASE/build.log" 2>/dev/null | head -1 | cut -d: -f1)
+            if [ -n "${L:-}" ]; then
+              s=$(( L > 150 ? L - 150 : 1 ))
+              sed -n "${s},$(( L + 20 ))p" "$BASE/build.log"
+            else
+              echo "(no 'failed to build' line)"
+            fi
+            echo
+            echo "## diagnose"
+            cat "$BASE/diag.log" 2>/dev/null || echo "(no diag.log)"
+            echo
+            echo "## defconfig"
+            cat "$BASE/defconfig.log" 2>/dev/null || echo "(no defconfig.log)"
+            echo
+            echo "## full build.log"
+            echo "lines: $(wc -l < "$BASE/build.log" 2>/dev/null || echo 0)"
+            cat "$BASE/build.log" 2>/dev/null || echo "(no build.log)"
           } > ci-log.txt
           git add ci-log.txt
           git commit -q -m "ci log $GITHUB_RUN_ID"
@@ -134,6 +190,8 @@ jobs:
           path: |
             ${{ steps.space.outputs.base }}/src/bin/targets/**/*.tar
             ${{ steps.space.outputs.base }}/build.log
+            ${{ steps.space.outputs.base }}/diag.log
+            ${{ steps.space.outputs.base }}/defconfig.log
           if-no-files-found: warn
           compression-level: 0
           retention-days: 14
