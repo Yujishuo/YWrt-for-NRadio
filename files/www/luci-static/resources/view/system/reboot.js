@@ -88,7 +88,7 @@ return view.extend({
 		body.appendChild(E('h2', {}, _('启动系统切换')));
 		body.appendChild(E('p', {},
 			_('本机可以在 SD 卡系统（YWrt）与原厂 NOR 系统之间切换。') + ' ' +
-			_('切换只改写 u-boot 的两个环境变量 boot_system 与 boot_from_sd，') + ' ' +
+			_('切换只改写 u-boot 的环境变量 boot_from_sd，') + ' ' +
 			_('不修改任何分区内容，下一次开机生效。')));
 
 		body.appendChild(E('div', { 'class': 'cbi-section' }, [
@@ -104,8 +104,7 @@ return view.extend({
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td' }, _('u-boot 环境')),
 					E('td', { 'class': 'td' }, E('code', {},
-						'boot_system=%s　boot_from_sd=%s'.format(
-							st.boot_system || '—', st.boot_from_sd || '—')))
+						'boot_from_sd=%s'.format(st.boot_from_sd || '—')))
 				])
 			])
 		]));
@@ -149,7 +148,7 @@ return view.extend({
 		return ui.showModal(_('切换启动系统'), [
 			E('p', {}, _('确定把下次启动目标改为「%s」吗？').format(systemLabel(target))),
 			E('p', { 'class': 'alert-message warning' },
-				_('这会写入 u-boot 环境变量（boot_system / boot_from_sd），') + ' ' +
+				_('这会写入 u-boot 环境变量 boot_from_sd，') + ' ' +
 				_('只影响下次开机，不改动任何分区内容。') + ' ' +
 				_('若目标与原厂系统不一致，请确认设备旁有人可以操作。')),
 			E('div', { 'class': 'right' }, [

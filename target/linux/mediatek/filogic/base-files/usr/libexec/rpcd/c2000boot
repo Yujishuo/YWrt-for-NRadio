@@ -14,11 +14,10 @@ running_system() {
 }
 
 target_system() {
-	local a b
-	a=$(env_get boot_system)
+	local b
 	b=$(env_get boot_from_sd)
-	[ -n "$a$b" ] || { echo unknown; return; }
-	if [ "$a" = "1" ] || [ "$b" = "1" ]; then
+	[ -n "$b" ] || { echo unknown; return; }
+	if [ "$b" = "1" ]; then
 		echo sd
 	else
 		echo nor
@@ -27,13 +26,12 @@ target_system() {
 
 cmd_status() {
 	local usable=0
-	fw_printenv boot_system >/dev/null 2>&1 && usable=1
+	fw_printenv boot_from_sd >/dev/null 2>&1 && usable=1
 
 	json_init
 	json_add_boolean "available" "$usable"
 	json_add_string "running" "$(running_system)"
 	json_add_string "target" "$(target_system)"
-	json_add_string "boot_system" "$(env_get boot_system)"
 	json_add_string "boot_from_sd" "$(env_get boot_from_sd)"
 	json_dump
 }
@@ -56,14 +54,6 @@ cmd_switch() {
 		return 0
 		;;
 	esac
-
-	if ! fw_setenv boot_system "$value" 2>/dev/null; then
-		json_init
-		json_add_boolean "ok" 0
-		json_add_string "message" "fw_setenv boot_system failed"
-		json_dump
-		return 0
-	fi
 
 	if ! fw_setenv boot_from_sd "$value" 2>/dev/null; then
 		json_init

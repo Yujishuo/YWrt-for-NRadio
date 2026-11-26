@@ -242,6 +242,12 @@ return view.extend({
 			while (simBody.firstChild)
 				simBody.removeChild(simBody.firstChild);
 
+			var bank = (si.bank === undefined || si.bank === null) ? '' : String(si.bank);
+			var bankSrc = '内置默认表';
+			if (bank && bank.indexOf('/') === 0)
+				bankSrc = (bank.indexOf('/mnt/') === 0)
+					? '原厂 p1 的 cpesel（回落）' : '本机 cpesel';
+
 			simBody.appendChild(E('table', { 'class': 'table' }, [
 				cell('当前卡位', cur ? ('卡位 %d · %s%s'.format(cur, simName(si, cur),
 					derived ? '' : '（按配置，模组未应答）')) : '未识别'),
@@ -251,8 +257,7 @@ return view.extend({
 				cell('板级开关', 'cpe-sel0 = ' + (gpio !== '' ? gpio : '?') +
 					(si.gpioName ? '（' + si.gpioName + '）' : '')),
 				cell('模组 usim', si.usim),
-				cell('卡位表', ('%d 张卡 · %s').format(cards.length || 0,
-					si.bank ? '来自原厂 cpesel' : '原厂配置读不到，用内置默认'))
+				cell('卡位表', ('%d 张卡 · %s').format(cards.length || 0, bankSrc))
 			]));
 
 			while (simMode.firstChild)
@@ -506,8 +511,10 @@ return view.extend({
 				simMode,
 				simBtns,
 				E('p', { 'class': 'cbi-value-description', 'style': 'margin-top:10px' },
-					'卡位数量、每张卡对应哪个板级电平 / 模组 usim 值，都是运行时从' +
-					'原厂的 /etc/config/cpesel（max / gval / stype）读的，没有写死。' +
+					'卡位数量、每张卡对应哪个板级电平 / 模组 usim 值，都写在' +
+					'/etc/config/cpesel（max / gval / stype，格式与原厂一致）；' +
+					'这份表在系统首次开机时从原厂分区只读抄录一次，之后直接读它，' +
+					'原厂分区平时不挂载。改这个文件后重启 c2000-modem 即可生效。' +
 					'切卡必须同时动两处：板级开关 cpe-sel0 和模组 AT^SCICHG 选卡寄存器，' +
 					'只改一边会得到「未插卡」(+CME ERROR: 10)。')
 			]),

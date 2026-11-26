@@ -1,6 +1,6 @@
 {
 	"luci-app-c2000-boot": {
-		"description": "C2000 Ultra 双系统切换（只读写 u-boot 的 boot_system / boot_from_sd）",
+		"description": "C2000 Ultra 双系统切换（只读写 u-boot 的 boot_from_sd）",
 		"read": {
 			"ubus": {
 				"c2000boot": [ "status" ]

@@ -131,15 +131,81 @@ SIM_CUR_OEM=""
 SIM_MODE_OEM=""
 SIM_SRC=""
 
+CPESEL_RECORD="${CPESEL_RECORD:-/etc/config/cpesel}"
+CPESEL_P1_DEV="${CPESEL_P1_DEV:-/dev/mmcblk0p1}"
+
+cpesel_extract() {
+	awk '
+		{ sub(/#.*/, "") }
+		$1 == "config" {
+			sec = $3; gsub(/[^0-9A-Za-z_-]/, "", sec); next
+		}
+		$1 == "option" && sec == "sim" {
+			v = $0
+			sub(/^[ \t]*option[ \t]+[^ \t]+[ \t]+/, "", v)
+			gsub(/[^0-9A-Za-z,._-]/, "", v)
+			printf "SIMF_%s=%s\n", toupper($2), v
+		}
+	' "$1" 2>/dev/null
+}
+
+cpesel_provision() {
+	[ -n "${CPESEL_FILE:-}" ] && return 0
+	[ -s "$CPESEL_RECORD" ] && return 0
+	[ -e "$CPESEL_P1_DEV" ] || return 1
+
+	local base mnt src max tmpf
+
+	base=$(awk -v d="$CPESEL_P1_DEV" '$1 == d { print $2; exit }' /proc/mounts 2>/dev/null)
+	if [ -n "$base" ]; then
+		mnt=""
+	else
+		mnt=/tmp/.cpesel-p1
+		mkdir -p "$mnt" 2>/dev/null || return 1
+		if ! mount -o ro,noatime,nodiratime "$CPESEL_P1_DEV" "$mnt" 2>/dev/null; then
+			rmdir "$mnt" 2>/dev/null
+			return 1
+		fi
+		base="$mnt"
+	fi
+
+	src="$base/upper/etc/config/cpesel"
+	[ -s "$src" ] || src=$(ls "$base"/upper/etc/config/kpcpe_*_cpesel 2>/dev/null | head -n 1)
+
+	max=""
+	[ -n "$src" ] && [ -s "$src" ] && max=$(cpesel_extract "$src" | sed -n 's/^SIMF_MAX=//p' | head -n 1)
+	case "$max" in ''|*[!0-9]*) max=0 ;; esac
+
+	if [ "$max" -ge 1 ] 2>/dev/null; then
+		tmpf="$CPESEL_RECORD.$$"
+		{
+			echo "# 首次开机从原厂分区 $CPESEL_P1_DEV 的 upper/etc/config/cpesel 抄录"
+			echo "# 抄录时间：$(date '+%Y-%m-%d %H:%M:%S')"
+			cat "$src"
+		} >"$tmpf" 2>/dev/null && chmod 644 "$tmpf" 2>/dev/null &&
+			mv -f "$tmpf" "$CPESEL_RECORD" 2>/dev/null
+		[ -f "$tmpf" ] && rm -f "$tmpf" 2>/dev/null
+		[ -s "$CPESEL_RECORD" ] && log "卡位表已从原厂 p1 抄录到 $CPESEL_RECORD（max=$max）"
+	fi
+
+	if [ -n "$mnt" ]; then
+		umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null
+		rmdir "$mnt" 2>/dev/null
+	fi
+
+	[ -s "$CPESEL_RECORD" ] || return 1
+	return 0
+}
+
 sim_bank_file() {
 	local f
 	if [ -n "${CPESEL_FILE:-}" ] && [ -s "$CPESEL_FILE" ]; then
 		echo "$CPESEL_FILE"
 		return 0
 	fi
-	for f in /mnt/mmcblk0p1/upper/etc/config/cpesel \
-	         /mnt/mmcblk0p1/upper/etc/config/kpcpe_*_cpesel \
-	         /etc/config/cpesel; do
+	for f in "$CPESEL_RECORD" \
+	         /mnt/mmcblk0p1/upper/etc/config/cpesel \
+	         /mnt/mmcblk0p1/upper/etc/config/kpcpe_*_cpesel; do
 		[ -s "$f" ] && { echo "$f"; return 0; }
 	done
 	return 1
@@ -150,21 +216,12 @@ sim_bank_load() {
 
 	local f max gval stype cur mode i g t newg news
 
+	cpesel_provision 2>/dev/null
+
 	f=$(sim_bank_file 2>/dev/null) || f=""
 
 	if [ -n "$f" ]; then
-		eval "$(awk '
-			{ sub(/#.*/, "") }
-			$1 == "config" {
-				sec = $3; gsub(/[^0-9A-Za-z_-]/, "", sec); next
-			}
-			$1 == "option" && sec == "sim" {
-				v = $0
-				sub(/^[ \t]*option[ \t]+[^ \t]+[ \t]+/, "", v)
-				gsub(/[^0-9A-Za-z,._-]/, "", v)
-				printf "SIMF_%s=%s\n", toupper($2), v
-			}
-		' "$f" 2>/dev/null)"
+		eval "$(cpesel_extract "$f")"
 		SIM_SRC="$f"
 	fi
 
