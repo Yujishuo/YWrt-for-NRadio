@@ -1,27 +1,3 @@
-# MTK 硬件 NAT（mtk_hnat）
-#
-# ⚠️⚠️ 2026-11-10 结案：**此板型必须保持 enabled=0，改成 1 会直接断网。**
-#   根因（已代码级定位，详见 docs/HNAT问题记录-交接.md §15）：
-#     · hnat_nf_hook.c:1243 只要入接口是 ext(eth2) 就把 TCP/UDP 包无条件注入
-#       PPD 并 NF_STOLEN，不检查表项是否已 BIND；
-#     · hnat_nf_hook.c:3014 是唯一绑定入口，但 `if (!IS_WHNAT(out) && IS_EXT(out))
-#       return 0;` —— 上行 out 就是 eth2，IS_EXT=1/IS_WHNAT=0，恒真 → 永不绑定。
-#     · 结果：表项永远 UNBIND、packets=0；且软件写 PPE1、PPD 注入查 PPE0 → 必丢。
-#   ICMP 不受影响（is_ppe_support_type 只认 TCP/UDP/IPV6），所以表现为
-#   "ping 正常、网页全打不开"。
-#   另：ext 出口的 FOE 表项 dp 本身就是 NR_PDMA_PORT（回 CPU），
-#   即便修好绑定也绕不开 CPU，而实测 CPU 从不是瓶颈 → 收益接近 0。
-#
-# enabled=1 才会 modprobe mtkhnat 并打开 hook；改完执行
-#   /etc/init.d/hnat restart
-# 立即生效，不需要重启。
-#
-# 排查用的 debugfs（模块加载后才有）：
-#   cat /sys/kernel/debug/hnat/hnat_entry     已绑定的流
-#   cat /sys/kernel/debug/hnat/cpu_reason     CPU 截包原因统计
-#   cat /sys/kernel/debug/hnat/external_interface
-#   cat /sys/kernel/debug/hnat/hnat_stats
-#
 config hnat 'config'
 	option enabled '0'
 	option ipv6 '1'

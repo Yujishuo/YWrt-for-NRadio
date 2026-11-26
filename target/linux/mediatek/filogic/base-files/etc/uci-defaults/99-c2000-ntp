@@ -1,34 +1,4 @@
 #!/bin/sh
-# 2026-11-09 用户要求：日期改成正确的（北京时间），NTP 服务器全部走国内源。
-#
-# ── 时区 ──────────────────────────────────────────────
-# 本镜像是 BSP 精简配置，**没有装 zoneinfo 数据库**（/usr/share/zoneinfo 不存在），
-# 所以不能靠 zonename 指向 /usr/share/zoneinfo/Asia/Shanghai 走软链那条路。
-# 实际生效链路是：
-#     /etc/init.d/system  →  echo "$timezone" > /tmp/TZ
-#     /etc/TZ -> /tmp/TZ  →  libc 读这个 POSIX TZ 串
-# 所以这里直接写 timezone='CST-8'。中国 1991 年后没有夏令时，CST-8 与
-# Asia/Shanghai 完全等价，不装 tzdata 也不会算错。
-# zonename 一并写 'Asia/Shanghai' 只是让 LuCI 的时区下拉框显示得对；
-# zoneinfo 文件不存在时 init 脚本那句 `ln -sf ... && rm -f /tmp/TZ` 会短路失败，
-# /tmp/TZ 保留，行为不受影响。
-#
-# ── NTP ───────────────────────────────────────────────
-# 原来继承 0~3.openwrt.pool.ntp.org（全在国外，5G 链路上常几十秒都同步不上，
-# 开机后日志时间戳会掉到 1970）。这里换成 3 家境内源共 6 个节点：
-#     国家授时中心  ntp.ntsc.ac.cn          1.82.219.234
-#     阿里云        ntp.aliyun.com          203.107.6.88
-#                   ntp1.aliyun.com         223.4.249.80
-#     腾讯云        time1.cloud.tencent.com 106.55.184.199
-#                   time2.cloud.tencent.com 111.230.189.174
-#                   time4.cloud.tencent.com 134.175.254.134
-# ntpd 会并行问所有 server，任一可达即可，所以留冗余不影响速度。
-#
-# 【2026-11-09 实测剔掉的两个域名】
-#   cn.ntp.org.cn  → NXDOMAIN，根本不存在（一度以为是"国内池"，是错的）
-#   cn.pool.ntp.org→ pool 按递归解析器地理位置分区域，在这条 5G 链路上
-#                    经常分到境外 IP（实测拿到过 193.182.111.14），不满足"全部国内"
-# 落 uci-defaults 是为了重刷镜像后不会退回 GMT0 / openwrt.pool.ntp.org。
 
 uci -q batch <<-EOF
 	delete system.ntp.server
@@ -44,7 +14,6 @@ uci -q batch <<-EOF
 	commit system
 EOF
 
-# 立刻让 /tmp/TZ 生效（首次启动时 system 服务可能还没跑完）
 [ -x /etc/init.d/system ] && /etc/init.d/system reload
 
 exit 0

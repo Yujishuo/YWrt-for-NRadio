@@ -10,25 +10,6 @@ var callStatus = rpc.declare({
 	expect: { }
 });
 
-/*
- * 【2026-11-09 修】expect 千万不要写成 { 某个键: 默认值 }。
- *
- * LuCI 的 rpc.js 里这段：
- *     if (req.expect) {
- *         for (const key in req.expect) {
- *             if (ret != null && key != '') ret = ret[key];      // 只取第一个键
- *             if (ret == null || 类型不符) ret = req.expect[key];
- *             break;                                            // 立刻 break
- *         }
- *     }
- * 也就是说 expect 里只要有 **一个** 键，整个返回对象就会被"拆掉"，
- * 只把那个键的值 resolve 出来：
- *   - 原来 callAt 写 expect:{ output:'' }  → 拿到的是字符串，
- *     r.output === undefined → AT 控制台永远显示"(无应答)"；
- *   - 原来 callSimSwitch 写 expect:{ ok:false } → 拿到的是布尔值，
- *     r.ok === undefined → 切卡永远报"切换失败：未知错误"。
- * 空对象 {} 时循环体不执行，返回的是完整对象，字段按名字取。
- */
 var callAt = rpc.declare({
 	object: 'c2000-modem',
 	method: 'at',
@@ -69,11 +50,6 @@ var callSimSetMode = rpc.declare({
 	expect: { }
 });
 
-/* 卡位表**不写死**。后端 siminfo 每次都返回 cards[]：
- *   { n, name, type, sel0, usim, cur }
- * name/type 来自原厂分区 /mnt/mmcblk0p1/upper/etc/config/cpesel 的
- * max / gval / stype —— 厂商以后改卡数量、改映射，这里自动跟上。
- *   stype: 0=卡槽 1=内置移动 2=内置联通 3=内置电信 4=内置 eSIM */
 function simName(si, n) {
 	var cs = (si && si.cards) || [];
 	for (var i = 0; i < cs.length; i++)
@@ -83,7 +59,7 @@ function simName(si, n) {
 }
 
 function cell(label, value) {
-	/* value 可能是节点（比如信号条），直接 String() 会变成 [object HTMLSpanElement] */
+
 	var v = (value && value.nodeType) ? value :
 		((value !== undefined && value !== null && value !== '') ? String(value) : '—');
 
@@ -100,8 +76,6 @@ function bar(n, active) {
 	}, '');
 }
 
-/* 信号来自模组 ^HCSQ（AT+CSQ 在本模组固件上只回空值）：
- * NR 模式字段顺序是 RSRP / SINR / RSRQ，含义见 c2000-modem 里的注释。 */
 function signalView(st) {
 	var bars = parseInt(st.bars || 0) || 0;
 	var dbm = (st.dbm === undefined || st.dbm === null) ? '' : String(st.dbm);
@@ -123,7 +97,6 @@ function signalView(st) {
 	]);
 }
 
-/* 模组给的是 kbps；≥1 Mbps 就换算，避免显示 500000 kbps 这种数 */
 function fmtRate(kbps) {
 	var n = parseInt(kbps, 10);
 	if (!n || n <= 0)
@@ -131,9 +104,6 @@ function fmtRate(kbps) {
 	return (n >= 1000) ? (Math.round(n / 100) / 10) + ' Mbps' : n + ' kbps';
 }
 
-/* 签约速率 = 网络下发的 UE-AMBR，来自 AT^DSAMBR=<cid>
- *   未拨号 / 未注网时拿不到，显示 —
- * 注意这是「签约/授权上限」，不是当前实际吞吐。 */
 function ambrText(st) {
 	var a = st && st.ambr;
 	if (!a || !(a.dl_kbps || a.ul_kbps))
@@ -146,8 +116,6 @@ function ambrText(st) {
 	return parts.join('　') + (a.apn ? '　（APN ' + a.apn + '）' : '');
 }
 
-/* 载波聚合 = AT^HFREQINFO? 回报的载波组数，每组一个频段
- *   rat: NR 的前缀写 n，LTE 写 B（后端用 arfcn×5==频率 判定） */
 function cellsText(st) {
 	var list = (st && st.cells) || [];
 	if (!list.length)
@@ -166,8 +134,6 @@ function sleep(ms) {
 	return new Promise(function(resolve) { window.setTimeout(resolve, ms); });
 }
 
-/* LuCI 的 E() 会把属性值直接 setAttribute，传 null 会变成字符串 "null"，
- * 所以禁用状态要显式写成 disabled="disabled"。 */
 function mkBtn(cls, label, disabled, handler) {
 	var attrs = { 'class': cls, 'click': handler };
 	if (disabled)
@@ -190,7 +156,6 @@ return view.extend({
 		var lastSim = data[1] || {};
 		var busy = false;
 
-		/* ---------- 模组状态 ---------- */
 		var body = E('div', {}, '');
 
 		var update = function(s) {
@@ -223,14 +188,11 @@ return view.extend({
 			return callStatus().then(update);
 		}, 15);
 
-		/* ---------- SIM 卡位 ---------- */
 		var simBody = E('div', {}, '');
 		var simMode = E('div', { 'style': 'margin:14px 0 6px' }, '');
 		var simBtns = E('div', { 'style': 'margin-top:8px' }, '');
 		var lastSig = '';
 
-		/* 只在这几个值真的变了才重建 DOM，否则 10 秒一次的轮询会把用户
-		 * 正在点的按钮整个换掉（点击会丢）。 */
 		var simSig = function(si) {
 			var r = (si && si.result) || {}, cs = (si && si.cards) || [];
 			var names = [];
@@ -293,7 +255,6 @@ return view.extend({
 					si.bank ? '来自原厂 cpesel' : '原厂配置读不到，用内置默认'))
 			]));
 
-			/* 模式切换 */
 			while (simMode.firstChild)
 				simMode.removeChild(simMode.firstChild);
 
@@ -333,8 +294,6 @@ return view.extend({
 			while (simBtns.firstChild)
 				simBtns.removeChild(simBtns.firstChild);
 
-			/* 自动模式下按钮只有两个，但卡表还是列出来（只读），
-			 * 让人一眼看出「现在识别到几张卡、各自什么映射」。 */
 			if (isAuto && cards.length) {
 				var chips = [];
 				cards.forEach(function(c) {
@@ -364,8 +323,7 @@ return view.extend({
 						busy || isCur,
 						ui.createHandlerFn(self, function() { return doSwitch(c); })
 					));
-					/* 不能 appendChild(' ')：传字符串会抛
-					 * "parameter 1 is not of type 'Node'"，整个 render 直接中断。 */
+
 					simBtns.appendChild(document.createTextNode(' '));
 				});
 			}
@@ -376,9 +334,6 @@ return view.extend({
 				})));
 		};
 
-		/* 后台干完之前按钮保持禁用，靠轮询 siminfo 收尾。
-		 * 手动切一张卡约 40~90 s；自动轮询一轮要试完所有卡，可能好几分钟，
-		 * 所以窗口给到 12 分钟（240 × 3s），并且自动模式要等 autorun 归 0。 */
 		var monitor = function(maxTicks) {
 			var n = 0, max = maxTicks || 240;
 
@@ -389,7 +344,7 @@ return view.extend({
 					renderSim(si);
 					var res = si && si.result;
 					var stillRunning = (si && si.autorun == 1);
-					/* running 表示还在试下一张，继续等 */
+
 					if (res && res.state && res.state !== 'running' && !stillRunning) {
 						busy = false;
 						renderSim(si);
@@ -412,11 +367,9 @@ return view.extend({
 			return tick();
 		};
 
-		/* 手动模式：切到用户点的卡，**不回滚**（后端 manual 分支只报告结果） */
 		var doSwitch = function(c) {
 			var isAuto = (String((lastSim && lastSim.mode) === undefined ? 1 : lastSim.mode) === '0');
-			/* 注意括号：String.format 只作用于「紧邻的那个字符串字面量」，
-			 * 不加外括号时弹窗里会出现字面的 「卡位 %d · %s」。 */
+
 			var msg = ('确认切换到「卡位 %d · %s」？\n\n' +
 				'切换会同时改板级开关（cpe-sel0）和模组选卡（AT^SCICHG），' +
 				'然后复位模组，网络中断约 30~60 秒。\n\n').format(c.n, c.name);
@@ -436,8 +389,7 @@ return view.extend({
 			return callSimSwitch(String(c.n), isAuto ? 'auto' : 'manual').then(function(r) {
 				ui.hideModal();
 				if (!r) {
-					/* RPC 超时/无应答时 LuCI 会给 null —— 别报「未知错误」，
-					 * 让用户去刷新看实际卡位（后台可能已经在切了）。 */
+
 					busy = false;
 					ui.addNotification(null,
 						E('p', {}, '模组无响应或超时，请稍后点「刷新」确认真实卡位。'), 'warning');
@@ -465,7 +417,6 @@ return view.extend({
 			});
 		};
 
-		/* 自动模式：让后端从卡位 1 开始轮询 */
 		var doAutoStart = function() {
 			if (!confirm('开始自动轮询？\n\n' +
 				'会从卡位 1 开始逐个尝试：每张卡都要改板级开关、复位模组、等注网、' +
@@ -513,8 +464,6 @@ return view.extend({
 
 		renderSim(lastSim);
 
-		/* 自动轮询可能是守护进程自己触发的（没网就找卡），页面要能跟上进度。
-		 * 只在 simSig 变化时才重建 DOM，避免把用户正要点的按钮换掉。 */
 		poll.add(function() {
 			return callSimInfo().then(function(si) {
 				if (simSig(si) !== lastSig)
@@ -524,7 +473,6 @@ return view.extend({
 			});
 		}, 15);
 
-		/* ---------- AT 控制台 ---------- */
 		var atOut = E('pre', {
 			'style': 'max-height:220px;overflow:auto;background:rgba(0,0,0,0.05);padding:8px;border-radius:4px'
 		}, '');
@@ -572,10 +520,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '操作'),
 				E('div', { 'style': 'margin-bottom:10px' }, [
-					/* 【2026-11-09】这里原来还有「下次启动：SD 系统 / 原厂系统」
-					 * 两个按钮，已移除 —— 启动系统切换统一放「重启」页面
-					 * （view/system/reboot.js，那边带「切换并重启」和只切换两种），
-					 * 5G 模组页不该管整机启动。 */
+
 					E('button', {
 						'class': 'btn cbi-button cbi-button-action',
 						'click': ui.createHandlerFn(this, function() {

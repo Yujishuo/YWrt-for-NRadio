@@ -1,37 +1,4 @@
 // SPDX-License-Identifier: (GPL-2.0 OR MIT)
-/*
- * NRadio C2000 Ultra / HC-WT9500 (MT7987A)
- *   —— chasey-dev/immortalwrt-mt798x-rebase 25.12-dev-wifi7 分支版本
- *      （upstream 布局 + MTK 闭源 mt_hwifi/mt_wifi7 + chasey 版 mtk_hnat）
- *
- * 与 device/dts/mt7987a-nradio-wt9500-bsp.dts（MTK BSP 树那份）的差异，只有这些：
- *
- *   1) USB3 不再需要板级覆盖。
- *      新树有 999-zzz-5008-dts-mtk-mt7987-add-usb3-port-by-default.patch，
- *      它直接改 mt7987.dtsi：u3p-dis-msk=<0> 且 phys 同时挂 tphyu2port0(USB2)
- *      与 tphyu3port0(USB3)，全树生效。这里只留 status/vusb33-supply。
- *
- *   2) HNAT 节点改用 &hnat override，不再自建 node。
- *      新树 mt7987-netsys.dtsi 已定义
- *        hnat: hnat@15000000 { compatible = "mediatek,mtk-hnat_v5";
- *                              reg = <0 0x15100000 0 0x80000>; ... }
- *      并且文件末尾的 &hnat 块默认 status="okay"。所以这里只覆盖名字属性。
- *
- *   3) ext-devices 属性名。
- *      chasey 这版 mtk_hnat 在 hnat.c:1899 只读 **"ext-devices"**，是 probe 时
- *      一次性读入的**精确接口名列表**（没有前缀匹配，全文件搜 "prefix" 为空）。
- *      新树 dtsi 里那个 ext-devices-prefix 是死属性、驱动不读，别指望它。
- *      代价：USB 模组的网卡名必须是可预测的常量，这里按实测的 eth2 写死，
- *      再补一个 usb0 兜底（多写一个名字只是多占一个表项，不影响任何路径）。
- *
- *   4) pwm 的 #pwm-cells 是 2（新树 mt7987.dtsi），所以 pwms 只带 <index period>，
- *      BSP 版写的是 3 个 cell。
- *
- * 硬件事实来源（全部只读采集，未改动原厂任何内容）：
- *   - 原厂 DTB 反编译：/home/chawrt/vd/vendor.dts
- *   - 第三方能开机的 24.10 固件 DTB：/home/chawrt/mwrt/mwrt.dts
- *   两者在以太网 / MMC / LED / 按键几段上逐字节一致，可直接作为基准。
- */
 
 /dts-v1/;
 
@@ -46,21 +13,10 @@
 	compatible = "nradio,wt9500", "hcmt,wt9500",
 		     "mediatek,mt7987a", "mediatek,mt7987";
 
-	/*
-	 * mt7987a.dtsi 写的是 0x10000000（256 MiB），实测本机 1 GiB。
-	 * 同名节点会被合并，这里覆盖 reg。
-	 */
 	memory {
 		reg = <0 0x40000000 0 0x40000000>;
 	};
 
-	/*
-	 * bootargs 逐字对照原厂 DTB：
-	 *   console=ttyS0,115200n1 loglevel=8 earlycon=uart8250,mmio32,0x11000000
-	 *   pci=pcie_bus_perf root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs
-	 * 原厂没有 init=、没有 rootdelay，我们也不加。
-	 * 根分区走 SD 卡的 GPT 标签 rootfs（p4），与 NOR 无关。
-	 */
 	chosen {
 		bootargs = "console=ttyS0,115200n1 loglevel=8 \
 			    earlycon=uart8250,mmio32,0x11000000 \
@@ -75,7 +31,6 @@
 		led-upgrade = &led_status;
 	};
 
-	/* 原厂：reset = pio1，wps = pio0，都是低有效，10 ms 消抖 */
 	gpio-keys {
 		compatible = "gpio-keys";
 
@@ -103,11 +58,6 @@
 		regulator-always-on;
 	};
 
-	/*
-	 * 5G 模组 / 风扇电源时序，交给用户态控制。
-	 * 依赖 target/linux/generic/hack-6.12/800-GPIO-add-named-gpio-exports.patch
-	 * （新树已自带，且 CONFIG_GPIO_SYSFS=y），否则 /sys/class/gpio/cpe-sel0 不存在。
-	 */
 	gpio_export {
 		compatible = "gpio-export";
 		#size-cells = <0>;
@@ -131,7 +81,6 @@
 		};
 	};
 
-	/* 原厂 5 颗 LED，全部低有效 */
 	gpio-leds {
 		compatible = "gpio-leds";
 
@@ -140,19 +89,16 @@
 			gpios = <&pio 9 GPIO_ACTIVE_LOW>;
 		};
 
-		/* 原厂 label 是 cmode5 */
 		sig1 {
 			label = "hc:blue:sig1";
 			gpios = <&pio 8 GPIO_ACTIVE_LOW>;
 		};
 
-		/* 原厂 label 是 cmode4 */
 		sig2 {
 			label = "hc:blue:sig2";
 			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
 		};
 
-		/* 原厂 label 是 int_error */
 		sig3 {
 			label = "hc:blue:sig3";
 			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
@@ -165,15 +111,6 @@
 	};
 };
 
-/*
- * 三个 MAC 与原厂一一对应：
- *   gmac0 -> 外置 Airoha EN8811H 2.5G PHY（mdio 0x0b，reset pio42，2500base-x）
- *   gmac1 -> MT7987 内置 2.5G PHY（C45，mdio 0x0f，internal）
- *   gmac2 -> 内置交换（GSW）的 CPU 口，fixed-link 2500，label=hnat
- *
- * 原厂 DTB 里 gmac2 没有 pcs-handle（fixed-link 接交换机，不过 PCS），
- * 跟原厂对齐，删掉 dtsi 带进来的那个。
- */
 &eth {
 	status = "okay";
 };
@@ -203,41 +140,6 @@
 	};
 };
 
-/*
- * MTK 硬件 NAT（mtk_hnat / HNAT v5）
- *
- * 节点本身由 mt7987-netsys.dtsi 提供（hnat@15000000, reg 0x15100000, 0x80000），
- * 且该文件末尾的 &hnat 块已经写了 status="okay"。下面只覆盖名字属性。
- *
- * 名字约束（驱动在 probe 里用 of_property_read_string 逐个读取，h nat.h 的
- * IS_LAN/IS_LAN2/IS_PPD/IS_EXT 都是**名字前缀比较**）：
- *   mtketh-wan   = wan  → **故意写一个不存在的名字**，见下面「WAN 为什么留空」
- *   mtketh-lan   = eth0  → gmac0 / 外置 EN8811H
- *   mtketh-lan2  = eth1  → gmac1 / 内置 2.5G
- *   mtketh-ppd   = hnat  → gmac2（GSW CPU 口）那个虚拟网卡
- *
- * ext-devices 是把「非 GE 网卡」纳入 HNAT 的唯一机制：probe 时读入精确名字，
- * 之后 IS_EXT() 为真，进 FOE_MAGIC_EXT 分支，才会走 do_hnat_ext_to_ge()
- * （入口→PPE）与 do_hnat_ge_to_ext()（PPE→出口）。
- * eth2 必须在这里，否则 USB 模组方向完全不会被卸载。
- *
- * ── WAN 为什么留空（关键，别改回 eth2）──────────────────────────────
- * tx 方向的分类是先判 LAN/WAN、后判 EXT：
- *
- *     if (IS_LAN_GRP(dev) || IS_WAN(dev)) {
- *             mac = netdev_priv(master_dev);  // 当它是个 mtk_mac
- *             gmac = HNAT_GMAC_FP(mac->id);
- *     } else if (IS_EXT(dev)) { ... }
- *
- * IS_WAN 是纯名字前缀比较，优先级高于 IS_EXT。若 mtketh-wan 写 "eth2"，
- * eth2 会同时命中两者，于是在 tx 分支里被当成 GE 口，对 USB 网卡做
- * netdev_priv() 再当 struct mtk_mac 用 —— 读到的是 usbnet 私有区里的垃圾，
- * 轻则 act_dp 填错口，重则按垃圾值去 set_gmac_ppe_fwd()。
- * 设成不存在的 "wan"，IS_WAN 恒假，eth2 就只以 EXT 身份出现：
- *   up 方向：in=eth0/eth1(LAN) → out=eth2(EXT) → do_hnat_ge_to_ext()
- *   down 方向：in=eth2(EXT)   → out=eth0/eth1  → PPE 直转
- * 代价是 g_wandev 为 NULL，只有 MAP-E 那条路会用到它（mape_toggle=0，不启用）。
- */
 &hnat {
 	mtketh-wan = "wan";
 	mtketh-lan = "eth0";
@@ -246,14 +148,13 @@
 	mtketh-max-gmac = <3>;
 	mtketh-ppe-num = <2>;
 
-	/* 精确名字，非前缀。eth2 = USB CDC-NCM 的 5G 模组口 */
 	ext-devices = "eth2", "usb0";
 
 	status = "okay";
 };
 
 &mdio {
-	/* 外置 EN8811H，PHY ID 0x03a2a411 */
+
 	phy11: ethernet-phy@b {
 		compatible = "ethernet-phy-id03a2.a411";
 		reg = <0xb>;
@@ -266,11 +167,6 @@
 		airoha,phy-handle;
 	};
 
-	/*
-	 * 内置 2.5G PHY：原厂与第三方都**不声明 interrupts**，走轮询。
-	 * 此前给过 GIC_SPI 286，结果 phylib 切到 IRQ 模式等不到中断，
-	 * 链路 3~6 秒一轮 Up/Down，每次都清 MAC_MCR_TX_EN，直接把 TX 打断。
-	 */
 	phy15: ethernet-phy@f {
 		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <0xf>;
@@ -280,11 +176,6 @@
 	};
 };
 
-/*
- * SD 卡槽 —— 逐字照抄原厂 / 第三方，不自己发明。
- * non-removable + broken-cd + no-mmc + no-sdio：卡永远在、别查 CD、
- * 只当 SD 不当 eMMC、别试 SDIO。少了这几个在 6.12 的 mtk-sd 上拿不到卡。
- */
 &mmc0 {
 	status = "okay";
 	pinctrl-names = "default", "state_uhs";
@@ -302,12 +193,10 @@
 	no-sdio;
 };
 
-/* MSDC 与 spi1 共用管脚，必须关掉 spi1 */
 &spi1 {
 	status = "disabled";
 };
 
-/* NOR 挂在 SPI2（spi@11009800）上；分区表与 u-boot mtdparts 完全一致，全程只读 */
 &spi2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi2_flash_pins>;
@@ -323,7 +212,7 @@
 		spi-cal-mode = "read-data";
 		spi-cal-datalen = <7>;
 		spi-cal-data = /bits/ 8 <
-			0x53 0x46 0x5F 0x42 0x4F 0x4F 0x54>; /* SF_BOOT */
+			0x53 0x46 0x5F 0x42 0x4F 0x4F 0x54>;
 		spi-cal-addrlen = <1>;
 		spi-cal-addr = /bits/ 32 <0x0>;
 		reg = <0>;
@@ -352,7 +241,6 @@
 				#address-cells = <1>;
 				#size-cells = <1>;
 
-				/* 头部 0x7992 = MT7992，WiFi 校准数据 */
 				eeprom_factory_0: eeprom@0 {
 					reg = <0x0 0x1e00>;
 				};
@@ -379,44 +267,17 @@
 	};
 };
 
-/* MT7992 WiFi 7，PCIe0（0000:01:00.0，id 14c3:7992） */
 &pcie0 {
 	status = "okay";
 
-	/*
-	 * PERST# / CLKREQ# / WAKE# 必须切到 pcie 功能，否则 mt7992 一直被按在
-	 * 复位态，PCIe 总线上一个设备都枚举不到。
-	 */
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcie0_pins>;
-
-	/*
-	 * 这里【故意不写】 wifi-reset-gpios / wifi-reset-msleep。
-	 *
-	 * b7 曾经照抄原厂 live-HC-WT9500.dtb 的 pcie@11280000 加过
-	 *     wifi-reset-gpios = <&pio 38 GPIO_ACTIVE_HIGH>;
-	 *     wifi-reset-msleep = <100>;
-	 * 结果整机静默（PC 拿 169.254.x，链路 1Gbps 但 Rx delta=0），只能 RST 复原厂。
-	 *
-	 * 反证：原厂系统 WiFi 双频正常广播 SSID，但
-	 *   /sys/kernel/debug/gpio  里根本没有 gpio-550（= gpiochip0 base512 + pin38）。
-	 * 说明原厂内核（6.12.94）并不真正占用这个 GPIO —— DTB 里那两行是死配置，
-	 * 照抄过来只会让 6.12.116 的 pcie-mediatek-gen3.c 去拉一根没人用的脚，
-	 * 100ms 后拉低，把某个电源轨/器件带走。
-	 *
-	 * 而且已经证明它不是 WiFi 崩的根因：真正的差异在
-	 * /lib/firmware 的 MT7992 固件 bin（原厂 2026-07-06 / 我们 2025-06-12）。
-	 */
 
 	pcie@0,0 {
 		reg = <0x0000 0 0 0 0>;
 		#address-cells = <3>;
 		#size-cells = <2>;
 
-		/*
-		 * 闭源栈（mt_hwifi）沿用 mt76 的 DT 绑定，compatible 必须是
-		 * "mediatek,mt76" —— 与同树 routerich_be7200 的写法一致。
-		 */
 		mt7992@0,0 {
 			compatible = "mediatek,mt76";
 			reg = <0x0000 0 0 0 0>;
@@ -445,11 +306,6 @@
 	status = "disabled";
 };
 
-/*
- * USB：U3 屏蔽与双 PHY 已由 999-zzz-5008 patch 在 mt7987.dtsi 里全局解决
- * （u3p-dis-msk=<0>，phys 同时挂 tphyu2port0 PHY_TYPE_USB2 与
- *   tphyu3port0 PHY_TYPE_USB3），这里只负责打开节点与供电。
- */
 &ssusb {
 	status = "okay";
 	vusb33-supply = <&reg_3p3v>;
@@ -459,7 +315,6 @@
 	status = "okay";
 };
 
-/* 风扇：PWM1（原厂 DTB 的 fan/pwm 就是这个脚，pwm1_0 = PWM1@PIN7） */
 &pio {
 	pwm1_pin: pwm1-pin {
 		mux {
@@ -478,7 +333,7 @@
 &fan {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pwm1_pin>;
-	/* 新树 mt7987.dtsi 里 pwm 的 #pwm-cells = <2>：<index period> */
+
 	pwms = <&pwm 1 40000>;
 	cooling-levels = <0 128 255>;
 	status = "okay";

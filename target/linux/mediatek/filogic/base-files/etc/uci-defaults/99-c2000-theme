@@ -1,14 +1,4 @@
 #!/bin/sh
-#
-# 默认主题：Vantage（luci-theme-vantage）
-#
-# 编号必须是 99：主题包自带的 30_luci-theme-vantage 只在「首次安装」时才
-# 设 mediaurlbase，而 luci-theme-ywrt 的 31_ 脚本会把 mediaurlbase 设成
-# /luci-static/ywrt。30 < 31 < 99，所以这里用 99 号最后盖一次。
-#
-# 只改 mediaurlbase，不删 luci.themes.Vantage / YWrt / Argon ——
-# 用户仍可在 系统 → 语言和界面 → 设计 里切换。
-#
 
 [ -d /www/luci-static/vantage ] || exit 0
 
@@ -17,7 +7,6 @@ uci -q set luci.themes.Vantage='/luci-static/vantage'
 uci -q set luci.main.mediaurlbase='/luci-static/vantage'
 uci -q commit luci
 
-# Vantage 主题自己的外观配置骨架（正常由包内 /etc/config/vantage_theme 带进来）
 if ! uci -q get 'vantage_theme.@appearance[0]' >/dev/null 2>&1; then
 	uci -q add vantage_theme appearance >/dev/null 2>&1
 	uci -q commit vantage_theme 2>/dev/null

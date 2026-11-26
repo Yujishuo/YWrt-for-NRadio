@@ -1893,7 +1893,6 @@ return view.extend({
 					};
 				}
 
-
 				var crypto_modes = [];
 
 				if (hwtype == 'mac80211') {
@@ -2053,7 +2052,6 @@ return view.extend({
 					encr.value(crypto_modes[i][0], '%s (%s)'.format(crypto_modes[i][1], security_level));
 				}
 
-
 				o = ss.taboption('encryption', form.Value, 'auth_server', _('Radius-Authentication-Server'));
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
 				o.rmempty = true;
@@ -2099,7 +2097,6 @@ return view.extend({
 				o.rmempty = true;
 				o.password = true;
 
-
 				o = ss.taboption('encryption', form.Value, '_wpa_key', _('Key'));
 				o.depends('encryption', 'psk');
 				o.depends('encryption', 'psk2');
@@ -2123,7 +2120,6 @@ return view.extend({
 					uci.unset('wireless', section_id, 'key3');
 					uci.unset('wireless', section_id, 'key4');
 				};
-
 
 				o = ss.taboption('encryption', form.ListValue, '_wep_key', _('Used Key Slot'));
 				o.depends('encryption', 'wep-open');
@@ -2156,7 +2152,6 @@ return view.extend({
 						uci.set('wireless', section_id, this.option, value);
 					};
 				}
-
 
 				if (hwtype == 'mac80211') {
 
@@ -2403,7 +2398,6 @@ return view.extend({
 					o = ss.taboption('encryption', form.Value, 'password', _('Password'));
 					add_dependency_permutations(o, { mode: ['sta', 'sta-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'], eap_type: ['fast', 'peap', 'ttls'] });
 					o.password = true;
-
 
 					if (hwtype == 'mac80211') {
 						// ieee802.11w options
@@ -3444,7 +3438,7 @@ return view.extend({
 				var wifi_sections = uci.sections('wireless', 'wifi-iface');
 				var mbssid_num = 0;
 				var max_mbssid_num = 16;
-	
+
 				for (var i = 0; i < wifi_sections.length; i++) {
 					if (wifi_sections[i].device == radioDev.getName() && wifi_sections[i].mode == "ap")
 						mbssid_num++;

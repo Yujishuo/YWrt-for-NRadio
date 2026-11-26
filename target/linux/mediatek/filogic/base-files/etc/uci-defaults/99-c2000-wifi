@@ -1,15 +1,4 @@
 #!/bin/sh
-#
-# C2000 Ultra：首次开机把两个射频和默认 AP 都打开
-#
-# 为什么要这个：出厂 /etc/config/wireless 生成时 radio 和 default_radioX 都是
-# disabled='1'，刷完开机 WiFi 是关的，必须手动进后台打开。这里在首次开机
-# （/etc/uci-defaults 只跑一次，成功后自删）时统一置 0。
-#
-# 注意：这是烤进 /rom 的，第二系统「恢复出厂设置」清空 overlay 后会自动再跑一遍。
-#
-# 不改 SSID / 加密方式：这两项由 lib/wifi/mtwifi.uc 生成
-# （SSID = YWrt-2.4G / YWrt-5G，加密 = psk2，默认口令 12345678）。
 
 [ -f /etc/config/wireless ] || exit 0
 uci -q get wireless.radio0 >/dev/null 2>&1 || exit 0
@@ -26,7 +15,6 @@ for r in radio0 radio1; do
 	fi
 done
 
-# wifi-iface 段名不固定（default_radio0 / default_radio1 …），按类型遍历
 for sec in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface$/\1/p"); do
 	if [ "$(uci -q get "wireless.$sec.disabled")" != "0" ]; then
 		uci -q set "wireless.$sec.disabled=0"

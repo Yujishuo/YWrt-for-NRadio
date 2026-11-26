@@ -1,45 +1,7 @@
 #!/bin/sh
-#
-# C2000 Ultra / HC-WT9500 —— 首次开机：从 bdinfo 分区读本机出厂 MAC，固定到各网口
-#
-# ★ 本脚本不含任何写死的 MAC ★
-#   每次运行都现场读本机的 bdinfo 分区，解析出该机自己的出厂 MAC，
-#   再据此推导各网口地址。换一台机器、换一个 MAC 值，结果自动跟着变。
-#
-# 【为什么需要】
-#   /rom 的 DTS 里没有 local-mac-address，u-boot 也不做 fdt fixup，
-#   内核就给 eth0 / eth1 分配随机本地管理地址（见过 1a:14:.. / 9e:f7:.. / 8a:e1:..），
-#   每次重启都变 —— DHCP 租约对不上、静态绑定失效、ARP 缓存里每次都是新设备。
-#
-# 【MAC 从哪来】
-#   原厂 bdinfo 分区（MTK 常见为 mtd3，512 KiB）是纯文本键值对，其中
-#       2fac_mac = <本机出厂 MAC>
-#   与原厂系统 br-lan 的 MAC 一致（本机已实测比对 ARP）。
-#   ★ 对该分区只读，不写一个字节。★
-#
-# 【分配规则】沿用 MTK 常见做法：一个 base，逐口 +1
-#   eth0  gmac0 + 外置 EN8811H（机身 WAN 口）        = base + 0
-#   eth1  gmac1 + MT7987 内置 2.5G PHY（LAN2）       = base + 1
-#   eth2  MT5700 5G 模组（USB CDC-NCM）              不动，模组自带 MAC
-#   hnat  gmac2（内置 GSW，上游无 DSA 驱动）          不动
-#
-# 【什么时候跑】
-#   本文件装在 /rom/etc/uci-defaults/（squashfs 只读层，烤进固件）。
-#   /etc/init.d/boot 每次开机都会 source 该目录下存在的文件，成功后删除。
-#   因此：刷机后首次开机 —— 会跑；
-#         第二系统里执行「恢复出厂设置」 —— overlay 被清空，/rom 里这份重新
-#         可见，下次开机会再跑一遍，MAC 照样自动补回来，不会掉。
-#
-# 【注意】这个文件是被 `( . ./file )` source 执行的，**不要**在里面 set -e/-u，
-#         也不要指望 $0。所有变量都用 ${x:-} 形式判断。
-#
-# 【调试】C2000_BDINFO_FILE=/path 指到假的 bdinfo 文件；
-#         C2000_MAC_DRYRUN=1 只算不写，用来验证任意 MAC 的推导结果。
-#
 TAG=c2000-mac
 log() { logger -t "$TAG" "$*" 2>/dev/null; echo "$TAG: $*" >&2; }
 
-# ---- 1) 定位 bdinfo 分区 ----------------------------------------------------
 if [ -n "${C2000_BDINFO_FILE:-}" ]; then
 	BDIDEV="$C2000_BDINFO_FILE"
 	log "使用调试用 bdinfo 文件 $BDIDEV"
@@ -55,23 +17,18 @@ else
 fi
 [ -r "$BDIDEV" ] || { log "$BDIDEV 不可读，跳过"; exit 0; }
 
-# ---- 2) 只读取候选键值 ------------------------------------------------------
-# bdinfo 里混着二进制：先把不可打印字符压成换行，再按行抓 key=value。
 RAW=$(dd if="$BDIDEV" 2>/dev/null \
 	| tr -c '\11\12\15\40-\176' '\n' \
 	| sed -n 's/^[[:space:]]*\(2fac_mac\|base_mac\|lan_mac\|ethaddr\|macaddr\|mac\)[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1 \2/p')
 
 [ -n "${RAW:-}" ] || { log "bdinfo 里没有 MAC 字段，跳过"; exit 0; }
 
-# ---- 3) 按优先级取第一个可用的，并归一化成 XX:XX:XX:XX:XX:XX -----------------
 BASE=
 USEDKEY=
 for k in 2fac_mac base_mac lan_mac ethaddr macaddr mac; do
 	val=$(printf '%s\n' "$RAW" | awk -v k="$k" '$1==k { print $2; exit }')
 	[ -n "${val:-}" ] || continue
 
-	# 去掉分隔符与任何非十六进制字符，统一大写，兼容
-	#   FC:83:C6:18:80:32 / fc-83-c6-18-80-32 / FC83C6188032
 	h=$(printf '%s' "$val" | tr -cd '0-9a-fA-F' | tr 'a-f' 'A-F')
 	if [ ${#h} -ne 12 ]; then
 		log "键 $k 的值 '$val' 不是 12 位十六进制，试下一个"
@@ -80,13 +37,11 @@ for k in 2fac_mac base_mac lan_mac ethaddr macaddr mac; do
 
 	cand=$(printf '%s' "$h" | sed 's/\(..\)/\1:/g; s/:$//')
 
-	# 全 0 是无效值
 	if [ "$h" = "000000000000" ]; then
 		log "键 $k 是全 0，试下一个"
 		continue
 	fi
 
-	# 首字节最低位为 1 表示组播地址，不能当单播 MAC
 	first=$((0x$(printf '%s' "$h" | cut -c1-2)))
 	if [ $((first & 1)) -eq 1 ]; then
 		log "键 $k 的值 '$cand' 是组播地址，试下一个"
@@ -100,9 +55,6 @@ done
 
 [ -n "${BASE:-}" ] || { log "bdinfo 里没找到可用的 MAC，跳过（网口仍可用，只是 MAC 随机）"; exit 0; }
 
-# ---- 4) 推导 eth1 = base + 1（只动最后一个字节）-----------------------------
-# 末字节是 0xFF 时不能进位（会把倒数第二字节也改掉，可能撞上别的设备的地址），
-# 也不能让两个口同 MAC（同一网桥下 FDB 会打架），所以这种极端情况退回 -1。
 PFX=${BASE%:*}
 LAST=${BASE##*:}
 N=$((0x$LAST))
@@ -118,19 +70,16 @@ else
 	M1=$(printf '%s:%02X' "$PFX" $((N + 1)))
 fi
 
-# ---- 5) 干跑：只报结果，不落配置 --------------------------------------------
 if [ -n "${C2000_MAC_DRYRUN:-}" ]; then
 	log "【干跑】来源键 $USEDKEY   eth0=$BASE  eth1=$M1"
 	exit 0
 fi
 
-# ---- 6) 安全检查：没有 lan 接口就别动配置，免得写出没 LAN 的坏 network --------
 if ! uci -q get network.lan >/dev/null 2>&1; then
 	log "network.lan 不存在，为避免破坏网络配置，跳过 MAC 写入"
 	exit 0
 fi
 
-# ---- 7) 写入 /etc/config/network（命名段，netifd 负责应用；可重复执行）-------
 if uci -q batch <<-EOF
 	set network.dev_eth0=device
 	set network.dev_eth0.name='eth0'

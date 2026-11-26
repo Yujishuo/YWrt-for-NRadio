@@ -274,11 +274,6 @@ mediatek_setup_interfaces()
 		;;
 	nradio,wt9500|\
 	hcmt,wt9500)
-		# C2000 Ultra：gmac0=外置 EN8811H、gmac1=内置 2.5G、gmac2=GSW(hnat)
-		# 只配 LAN（eth0 + eth1 进 br-lan）。WAN 是 USB 模组，由 c2000-modem
-		# 自己建 wwan 接口，不在这里声明。
-		# 与 BSP 树 target/linux/mediatek/filogic/base-files/etc/board.d/02_network
-		# 里同一分支逐字一致，保证行为与已验证的 v27 相同。
 		ucidef_set_interface_lan "eth0 eth1"
 		;;
 	*)

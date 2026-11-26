@@ -1,39 +1,11 @@
 #!/bin/sh
-#
-# 首次启动把 odhcpd 配成 IPv6 relay 模式（对齐原厂 nradio_adv/ipv6_basic.lua 的做法）
-#
-# 原厂机制（从 NOR 原厂 rootfs 只读挂载确认）
-# ------------------------------------------
-# - oem/default/config/99_luci 里 luci.main.ipv6_relay='1'，真机默认支持 relay
-# - network.globals.ipv6 是总开关；打开时给 wan6 加 ipv6='1' + extendprefix='1'
-# - 开 relay 后 LAN 侧：ndp='hybrid' ra='server' dhcpv6='server'
-#                       ra_default='1' ra_management='0'
-# - WAN 侧：master='1' + ndp='relay'，lan 的 ip6class 设成 WAN 接口名列表
-#
-# 我们为什么用 relay 而不是 hybrid
-# --------------------------------
-# hybrid 需要 netifd 先有一个可下发的前缀对象，也就是原厂那套 wan6 + extendprefix
-# 的组合。那要在 eth2 上再起一个 dhcpv6 逻辑接口，风险直接落在 5G 链路上
-# （2026-11-14 改 network.wwan.proto 就把 IPv4 弄丢过，害用户重置路由器）。
-# relay 只要 odhcpd 把上游 RA 原样中继，不碰 network 配置，实测内网能直接拿到
-# 上游 2409:... 公网地址。
-#
-# WAN 侧为什么不留 ndp='relay'
-# ----------------------------
-# 模组/GGSN 对 eth2 上任何地址都做无差别 NDP 应答（连我们的 ULA fd91:...::1 都被
-# 它认领成自己的 MAC）。odhcpd 的 ndproxy_routing 于是认为所有主机都挂在 eth2，
-# 给每台主机建的 /128 全指向 eth2，把回程包又推回 5G。去掉 WAN 侧 ndp 后
-# /128 才正确落到 br-lan。
-#
 
 [ -f /etc/config/dhcp ] || exit 0
 
-# LAN：中继上游 RA / DHCPv6，IPv4 仍然自己发
 uci -q set dhcp.lan.ra='relay'
 uci -q set dhcp.lan.dhcpv6='relay'
 uci -q set dhcp.lan.ndp='relay'
 
-# WAN（5G 模组接口 wwan）：作为 relay master，只中继不服务
 uci -q set dhcp.wwan='dhcp'
 uci -q set dhcp.wwan.interface='wwan'
 uci -q set dhcp.wwan.ignore='1'

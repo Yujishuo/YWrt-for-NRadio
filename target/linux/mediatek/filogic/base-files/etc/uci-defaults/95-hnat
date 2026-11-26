@@ -1,9 +1,3 @@
 #!/bin/sh
-# 只是把 /etc/rc.d/S39hnat 建出来。
-#
-# 是否真的启用 HNAT 由 /etc/config/hnat 里的 option enabled 决定，
-# 默认 0 —— 服务会跑，但 start() 直接 return 0，什么也不做。
-# 这样既能保留「改一个 uci 就开」的运维路径，又不会在没人确认的情况下
-# 动 FOE 表。
 [ -x /etc/init.d/hnat ] && /etc/init.d/hnat enable
 exit 0

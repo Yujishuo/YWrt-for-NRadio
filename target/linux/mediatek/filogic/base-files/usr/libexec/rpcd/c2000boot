@@ -1,24 +1,10 @@
 #!/bin/sh
-#
-# rpcd 后端：ubus 对象 "c2000boot"
-#
-# 给 LuCI「系统 → 重启」页面上的「启动系统切换」用。
-# 只写 u-boot 环境里的两个键：
-#   boot_system  / boot_from_sd
-#   1 1 → 下次从 SD 卡（我们的 FanchmWrt）启动
-#   0 0 → 下次从 NOR（原厂系统）启动
-#
-# 不碰任何分区内容、不碰 bdinfo、不碰 SD 卡分区表。
-#
 . /usr/share/libubox/jshn.sh
 
 env_get() {
 	fw_printenv -n "$1" 2>/dev/null
 }
 
-# 当前跑的是哪个系统
-#   我们：/proc/cmdline 里 root=PARTLABEL=rootfs（SD 卡 p4，标签 rootfs）
-#   原厂：root 指向 mtd/ubi
 running_system() {
 	case "$(cat /proc/cmdline 2>/dev/null)" in
 	*PARTLABEL=rootfs*) echo sd ;;
@@ -27,7 +13,6 @@ running_system() {
 	esac
 }
 
-# 下次会启动哪个系统（按 env 推断）
 target_system() {
 	local a b
 	a=$(env_get boot_system)

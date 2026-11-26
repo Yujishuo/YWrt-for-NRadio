@@ -1,34 +1,5 @@
 #!/bin/sh
-#
-# C2000 Ultra（HC-WT9500）首次启动配置
-#
-# 【重要】这里不能关 netifd。
-#
-# fix15 时期为了绕开「br-lan 建桥后内核挂死」的怀疑，曾经在本脚本里执行
-#   rm -f /etc/rc.d/S20network
-# 结果是：内核把网口拉起来了（PC 侧 link Up / 1 Gbps 都正常），但系统里
-# 没有任何东西去建 br-lan、没有 dnsmasq 发 DHCP、也没有 IP —— 现象和
-# 「内核没起来」几乎一模一样，白白浪费了一轮排查。
-#
-# 本脚本现在只做三件事：补 network 骨架、设 root 口令、放开 dropbear。
-#
 
-# --- 1) 补 /etc/config/network 骨架 -------------------------------------
-#
-# 本树的 base-files 里没有 files/etc/config/network 这个模板（整棵树
-# find 都找不到），02_network 只负责生成 /etc/board.json。而 netifd 需要
-# /etc/config/network 才能把 br-lan 建起来。
-#
-# 另外：只写 proto/ipaddr/netmask 而**不写 device/ports** 的话，netifd
-# 会得到一个没有端口的空接口，等于没有网络 —— fix15 末尾那段 uci set
-# 就是这个问题（当时因为 netifd 被关掉了所以没暴露）。
-#
-# 端口取舍：
-#   eth0 = gmac0 + 外置 Airoha EN8811H（机身上的 WAN 丝印口）
-#   eth1 = gmac1 + MT7987 内置 2.5G PHY（LAN2，一直插线的那个）
-#   eth2 = gmac2，后面是 MT7987 内置 GSW 交换机。上游 6.12 没有 MT7987 的
-#          DSA/GSW 驱动，这个口即使注册出来也转发不了，先不放进桥。
-#
 if [ ! -f /etc/config/network ]; then
 	cat > /etc/config/network <<'EOF'
 config interface 'loopback'
@@ -55,15 +26,10 @@ config interface 'lan'
 EOF
 fi
 
-# --- 2) root 口令 --------------------------------------------------------
-# OpenWrt 默认 root 空口令，dropbear 拒绝空口令登录。
-# 直接改 /etc/shadow 的哈希（$1$ = MD5-crypt），避开 busybox passwd
-# 在非 tty 环境下读不到输入的问题。哈希对应明文 admin。
 if [ -f /etc/shadow ]; then
 	sed -i 's|^root:[^:]*:|root:$1$c2k0$Zj7WQGiYwdNgYmGLiDOJ50:|' /etc/shadow
 fi
 
-# --- 3) dropbear --------------------------------------------------------
 [ -f /etc/config/dropbear ] || touch /etc/config/dropbear
 uci -q batch <<-EOF
 	set dropbear.@dropbear[0].PasswordAuth='on'

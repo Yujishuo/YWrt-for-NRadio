@@ -100,7 +100,7 @@ define Device/netcore_n60-pro-mtkuboot
   DEVICE_VARIANT := (MTK U-Boot layout)
   DEVICE_DTS := mt7986a-netcore-n60-pro-mtkuboot
   DEVICE_DTS_DIR := ../dts-ext
-  DEVICE_PACKAGES := kmod-usb3 automount kmod-usb-ledtrig-usbport 
+  DEVICE_PACKAGES := kmod-usb3 automount kmod-usb-ledtrig-usbport
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -344,21 +344,6 @@ define Device/zhao_7981r128-mtkuboot
 endef
 TARGET_DEVICES += zhao_7981r128-mtkuboot
 
-#
-# NRadio C2000 Ultra / HC-WT9500 (MT7987A + MT7992)，SD 卡双系统
-#
-# 与同目录其它机型的关键差别：**不是 NAND UBI，是 SD 卡**。
-#   p3 = kernel（FIT：内核 + DTB）
-#   p4 = rootfs（squashfs，其后按 64KiB 对齐由 libfstools 认出 rootfs_data）
-# 产物是原厂后台「烧写第二系统」认的未压缩 tar：
-#   sysupgrade-nradio_c2000_ultra/kernel -> p3
-#   sysupgrade-nradio_c2000_ultra/root   -> p4
-# NOR 与 SD 的 GPT 一律不动，原厂系统只能只读访问。
-#
-# WiFi 用闭源 mt_hwifi/mt_wifi7，它们由 .config 里的全局
-# CONFIG_PACKAGE_kmod-mt_wifi7 / kmod-mt_hwifi / kmod-mt7992 带入，
-# 与同树 routerich_be7200 的做法一致，不在 DEVICE_PACKAGES 里重复列。
-#
 define Device/mediatek_nradio_c2000_ultra
   DEVICE_VENDOR := NRadio
   DEVICE_MODEL := C2000 Ultra
@@ -371,10 +356,6 @@ define Device/mediatek_nradio_c2000_ultra
   DEVICE_DTS_DIR := ../dts-ext
   DEVICE_DTC_FLAGS := --pad 4096
 
-  # USB 5G 模组（MT5700，CDC-NCM 数据口 + ttyUSB AT 口）必需的整套 USB 驱动。
-  # 少任何一个，eth2 不会出现、ttyUSB* 不会出现，等于没有 WAN。
-  # 依据 2026-11 实测的 v27 开机日志：cdc_ncm / cdc_mbim / cdc_wdm / cdc_ether /
-  # huawei_cdc_ncm / qmi_wwan / option / usb_wwan / rndis_host / cdc_acm / usbnet。
   DEVICE_PACKAGES := \
 	mt798x-2p5g-phy-firmware-internal \
 	kmod-mt798x-2p5g-phy \
@@ -388,8 +369,6 @@ define Device/mediatek_nradio_c2000_ultra
 	c2000-modem luci-app-c2000-modem \
 	uboot-envtools blkid mkf2fs
 
-  # 装载地址沿用实测能起的值：0x40000000 是 1GiB 内存起点，u-boot 自己占那一带，
-  # 所以放 0x40080000。原厂 u-boot 只会解 lzma，gzip 的 FIT 在 u-boot 阶段就过不去。
   KERNEL_LOADADDR := 0x40080000
   KERNEL := kernel-bin | lzma
   KERNEL_INITRAMFS := kernel-bin | lzma | \
@@ -401,7 +380,6 @@ define Device/mediatek_nradio_c2000_ultra
 	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb | \
 	sysupgrade-tar kernel=$$$$@
 
-  # 默认不选，避免 make defconfig 把别的目标顶掉
   DEFAULT := n
 endef
 TARGET_DEVICES += mediatek_nradio_c2000_ultra
